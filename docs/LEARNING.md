@@ -14,7 +14,7 @@ This project is built to **understand**, not just to ship. The code gets written
 | # | Feature | Concept note | Read | Ran it | Teach-back |
 |---|---|---|:-:|:-:|:-:|
 | 0 | Foundation | [00 · How services talk](learning/00-how-services-talk.md) | ☐ | – | ☐ |
-| 1 | Protobuf contract | _coming_ | ☐ | ☐ | ☐ |
+| 1 | Protobuf contract | [01 · gRPC and protobuf](learning/01-grpc-and-protobuf.md) | ☐ | ☐ | ☐ |
 | 2 | Services | _coming_ | ☐ | ☐ | ☐ |
 | 3 | CI | _coming_ | ☐ | ☐ | ☐ |
 | 4 | Cache + rate limit | _coming_ | ☐ | ☐ | ☐ |

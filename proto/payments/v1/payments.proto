@@ -1,0 +1,56 @@
+// The contract between orders-api (client) and payments-service (server).
+//
+// Both sides compile THIS file; neither hand-writes request/response classes.
+// Directory layout mirrors the package: payments/v1/payments.proto <-> package payments.v1
+syntax = "proto3";
+
+package payments.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service PaymentService {
+  // Charge a payment method. Safe to retry: the same idempotency_key
+  // returns the original result instead of charging twice.
+  rpc Charge(ChargeRequest) returns (ChargeResponse);
+
+  // Look up a previous payment.
+  rpc GetPayment(GetPaymentRequest) returns (Payment);
+}
+
+// Money is integer minor units (cents), never a float.
+message Money {
+  string currency = 1;      // ISO 4217, e.g. "USD"
+  int64 amount_minor = 2;   // 1999 == 19.99
+}
+
+enum PaymentStatus {
+  // proto3 enums must start at 0; 0 means "not set", never a real state.
+  PAYMENT_STATUS_UNSPECIFIED = 0;
+  PAYMENT_STATUS_APPROVED = 1;
+  PAYMENT_STATUS_DECLINED = 2;
+}
+
+message ChargeRequest {
+  string order_id = 1;
+  Money amount = 2;
+  string payment_method_token = 3;
+  string idempotency_key = 4;
+}
+
+message ChargeResponse {
+  string payment_id = 1;
+  PaymentStatus status = 2;
+  string decline_reason = 3;  // empty unless DECLINED
+}
+
+message GetPaymentRequest {
+  string payment_id = 1;
+}
+
+message Payment {
+  string payment_id = 1;
+  string order_id = 2;
+  Money amount = 3;
+  PaymentStatus status = 4;
+  google.protobuf.Timestamp created_at = 5;
+}

@@ -47,7 +47,7 @@ Full details, design decisions and the reasoning behind them: [docs/PLAN.md](doc
 | # | Feature | Branch | Status |
 |---|---|---|---|
 | 0 | Repo foundation, plan, learning log | `main` | ✅ |
-| 1 | Protobuf contract + compile step | `feat/proto-contract` | 🚧 |
+| 1 | Protobuf contract + compile step | `feat/proto-contract` | ✅ |
 | 2 | Services (REST + gRPC), Postgres, Compose | `feat/services` | ⬜ |
 | 3 | CI | `chore/ci` | ⬜ |
 | 4 | Redis cache + rate limiter | `feat/redis-cache-ratelimit` | ⬜ |
@@ -65,6 +65,12 @@ Full details, design decisions and the reasoning behind them: [docs/PLAN.md](doc
 ## Running it
 
 Not runnable end-to-end yet. Each feature PR adds its own run instructions here.
+
+What works today:
+
+```bash
+make test    # compile proto/payments/v1/payments.proto and run the contract tests
+```
 
 Configuration lives in a local `.env` (copy `.env.example`). `.env` is git-ignored; never commit keys.
 
