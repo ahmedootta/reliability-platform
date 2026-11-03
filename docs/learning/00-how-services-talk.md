@@ -6,7 +6,7 @@ Before any code: this project is a set of programs that must coordinate. The mos
 
 | Style | Shape | Caller waits? | Typical tech | Failure looks like |
 |---|---|---|---|---|
-| **Request/response (sync RPC)** | "do this, tell me the result" | Yes | REST/JSON, gRPC | timeout, error code |
+| **Request/response (sync RPC)** | "do this, tell me the result" | Yes | REST/JSON over HTTP | timeout, error code |
 | **Event / webhook (push)** | "this happened, FYI" | No, fire and forget | HTTP POST to a URL | delivery retried or lost |
 | **Message queue (async work)** | "someone please do this later" | No | Redis/RabbitMQ + Celery | job sits in queue, retried |
 | **Pull / scrape** | "I'll come and look at you" | n/a | Prometheus scraping `/metrics` | target `up == 0` |
@@ -17,21 +17,16 @@ Rule of thumb: **use sync when you need the answer to continue, async when you d
 
 | From → To | Style | Protocol | Why this choice |
 |---|---|---|---|
-| Locust / prober → orders-api | request/response | REST over HTTP/1.1 + JSON | Public-facing API: any client, browser-friendly, easy to debug with curl. |
-| orders-api → payments | request/response | **gRPC** over HTTP/2 + protobuf | Internal call where both sides are ours: typed contract, compact binary, built-in deadlines and status codes. |
+| Synthetic prober → orders-api | request/response | REST over HTTP/1.1 + JSON | Public-facing API: any client, browser-friendly, easy to debug with curl. |
+| orders-api → payments-api | request/response | REST over HTTP + JSON, with an `X-Request-ID` header | Simple and debuggable with curl. The request ID header is what lets one request be traced through both services' logs. |
 | orders-api → PostgreSQL | request/response | PostgreSQL wire protocol over TCP | The database dictates the protocol. |
-| orders-api → Redis (cache) | request/response | RESP over TCP | Same: Redis dictates it. |
 | Prometheus → services | **pull** | HTTP GET `/metrics` (text format) | Prometheus decides the cadence; a dead target is detected *because* the scrape fails (`up == 0`). Services need no knowledge of Prometheus. |
 | Prometheus → Alertmanager | push (events) | HTTP | Alerts are events. |
 | Alertmanager → remediator | **webhook** | HTTP POST + JSON | Alertmanager *only* speaks webhooks, so the receiver's protocol is dictated by the sender. A good reminder: protocol choice depends on who the client is. |
 | remediator → Celery worker | **message queue** | Redis as broker | The webhook handler must answer fast (Alertmanager retries slow receivers). The slow, fallible work (restart, wait, verify) is handed off and can be retried independently. |
 | Celery Beat → worker | message queue | Redis as broker | Beat is just a clock that enqueues jobs on a schedule. |
 | worker → Docker | request/response | HTTP over a Unix socket (via a proxy) | The Docker daemon's API. |
-| worker → LLM provider | request/response | HTTPS + JSON | An external API: slow, paid, fallible. Hence timeouts, budgets, fallbacks. |
-
-## Why the same system uses REST *and* gRPC
-
-REST/JSON optimises for **reach**: any language, curl, browsers, humans reading payloads. gRPC optimises for **internal efficiency and correctness**: a schema both sides compile, binary encoding, streaming, deadlines propagated across calls. You'd put REST at the edge and gRPC between your own services. Using gRPC where the client is a third party (like Alertmanager) would make no sense, which is exactly why that arrow is a webhook.
+| remediator → escalation webhook | webhook (outbound) | HTTP POST + JSON | Tells a human something needs attention. |
 
 ## Failure modes change with the style
 
@@ -46,7 +41,7 @@ This is what reliability engineering actually cares about:
 
 Answer in your own words, in `notes/00.md`:
 
-1. Why is Alertmanager → remediator a webhook rather than gRPC?
+1. Why is Alertmanager → remediator a webhook, and what decided that choice?
 2. Why doesn't the webhook handler restart the container itself?
 3. If payments becomes slow, what happens to orders-api's latency, and which mechanism limits the damage?
 4. Why does Prometheus pulling make `up == 0` possible, and what would pushing lose?
