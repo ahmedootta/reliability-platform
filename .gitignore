@@ -1,0 +1,23 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# generated protobuf/gRPC code (built by `make proto`, never committed)
+gen/
+
+# personal study notes (answers in your own words)
+notes/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
