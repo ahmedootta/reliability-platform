@@ -1,22 +1,34 @@
-# Project Plan (v2)
+# Project Plan
 
-Goal: **detect failures automatically, measure reliability against SLOs, fix common failures with zero manual steps, and use AI where it genuinely helps (triage and post-incident reviews) without ever letting it act unsupervised.**
+Goal: **detect failures automatically, measure reliability against SLOs, and fix common failures with zero manual steps.**
 
-v1 of this plan was a Prometheus + Alertmanager + Celery remediation platform. v2 keeps that core and adds four things v1 was missing: **gRPC** between services, **scheduled jobs that are themselves monitored**, **Redis caching and rate limiting**, and **LLM-assisted incident work**. Section 2 explains every change.
+Scope is deliberately limited to these skills, and every one is demonstrated by something you can run:
+
+| Skill | Where it shows up |
+|---|---|
+| Prometheus | metrics from every service, recording rules, alert rules |
+| Grafana | golden-signals and SLO / error-budget dashboards |
+| Logging | structured JSON logs with a request ID that follows a request across services |
+| Alerting | burn-rate alerts through Alertmanager |
+| SLOs / SLIs | availability and latency SLOs, error-budget tracking |
+| Availability monitoring | health checks, `up`, and a synthetic prober that acts like a user |
+| Incident response | incident records, MTTD / MTTR, auto-generated incident reports |
+| Operational task automation | the remediator: alert → runbook → action → verify → escalate |
+| Python scripting | chaos runner, report generator, rule generator |
+| Celery | remediation and verification tasks |
+| Scheduled jobs (cron) | Celery Beat schedules, including **monitoring of the jobs themselves** |
+| Webhooks | Alertmanager → remediator (inbound), escalation notice (outbound) |
 
 ## 1. Architecture
 
 ```mermaid
 flowchart LR
-  subgraph traffic [Traffic]
-    L["Locust (load)"]
-    P["Synthetic prober"]
-  end
-  L -->|REST| O["orders-api (FastAPI)"]
-  P -->|REST| O
-  O -->|gRPC| PAY["payments-service (gRPC)"]
+  P["Synthetic prober"] -->|REST| O["orders-api (FastAPI)"]
+  C["Chaos runner"] -.->|"fault endpoints"| O
+  C -.->|"fault endpoints"| PAY
+  O -->|"REST + X-Request-ID"| PAY["payments-api (FastAPI)"]
   O --> DB[("PostgreSQL")]
-  O --> RC[("Redis: cache + rate limit")]
+  PAY --> DB
 
   PROM["Prometheus"] -.->|"scrape /metrics"| O
   PROM -.->|"scrape /metrics"| PAY
@@ -26,33 +38,33 @@ flowchart LR
   GR["Grafana"] --> PROM
 
   REM -->|enqueue| RB[("Redis: Celery broker")]
-  BEAT["Celery Beat (cron-style schedules)"] -->|enqueue| RB
+  BEAT["Celery Beat (cron schedules)"] -->|enqueue| RB
   RB --> W["Celery worker"]
-  W -->|"Docker API (restart, via socket proxy)"| O
-  W -->|"Docker API (restart, via socket proxy)"| PAY
-  W -->|HTTPS| LLM["LLM provider"]
+  W -->|"Docker API via socket proxy"| O
+  W -->|"Docker API via socket proxy"| PAY
   W --> DB
 ```
 
-Every arrow is a different communication style on purpose. See [docs/learning/00-how-services-talk.md](learning/00-how-services-talk.md).
+Every arrow is a different communication style on purpose. See [learning/00-how-services-talk.md](learning/00-how-services-talk.md).
 
-## 2. What changed from v1, and why
+**Why two services:** orders-api depends on payments-api, which produces realistic failures. If payments is slow, orders becomes slow too, and you can show how to find which service is really at fault.
 
-| # | Finding in v1 | Change in v2 |
+## 2. Design decisions and the bugs they fix
+
+The first draft of this plan had these problems. Each is fixed here, and most have a test.
+
+| # | Problem | Decision |
 |---|---|---|
-| 1 | **Bug:** latency SLI queries `le="0.3"`, but the planned buckets (0.05 → 5s) usually lack a 0.3 boundary, so the query returns nothing. | Histogram buckets explicitly include 0.3: `0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 5`. A test asserts it. |
-| 2 | **Bug:** chaos "crash" fault plus Docker `restart: unless-stopped` means Docker fixes it before the remediator acts, so MTTR measures Docker, not our automation. | Services run with `restart: "no"` in the demo; the remediator is the only thing that restarts them. |
-| 3 | Dedupe "same fingerprint already handled → ignore" would also ignore a *new* incident with the same labels after the old one resolved. | Dedupe key = fingerprint **while an incident is open**. A `resolved` webhook closes it. |
-| 4 | "FastBurn caused by payments → restart payments" needs a *diagnosis* step that v1 never defined. | Remediation flow gains a **Diagnose** step (query dependency failure ratios in Prometheus). |
+| 1 | The latency SLI queries `le="0.3"`, but typical buckets (0.05 → 5s) have no 0.3 boundary, so the query returns nothing. | Buckets explicitly include 0.3: `0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 5`. A test asserts it. |
+| 2 | Chaos "crash" plus Docker `restart: unless-stopped` means Docker fixes it before the remediator acts, so MTTR would measure Docker, not our automation. | Services run with `restart: "no"` in the demo. The remediator is the only thing that restarts them. |
+| 3 | Dedupe "same fingerprint already handled → ignore" also ignores a *new* incident with the same labels after the old one resolved. | Dedupe key = fingerprint **while an incident is open**. A `resolved` webhook closes it. |
+| 4 | "FastBurn caused by payments → restart payments" needs a diagnosis step that was never defined. | Add a **Diagnose** step: query dependency failure ratios in Prometheus. |
 | 5 | "Wait 60s then verify" inside a Celery task blocks a worker. | Verify is a separate task scheduled with `countdown=60`. |
-| 6 | Availability SLI is `NaN` when there is zero traffic, so a total outage with no traffic fires nothing. | `up == 0` and the synthetic prober cover the zero-traffic case; documented and tested. |
-| 7 | "DB connection exhaustion" appears in the results table but no fault produces it. | Add a `hold-db-connections` fault endpoint. |
+| 6 | The availability SLI is empty at zero traffic, so a total outage with no traffic fires nothing. | `up == 0` and the synthetic prober cover the zero-traffic case. Documented and tested. |
+| 7 | "DB connection exhaustion" is in the results table but no fault produces it. | Add a `hold-db-connections` fault endpoint. |
 | 8 | Mounting `/var/run/docker.sock` into the remediator gives it root on the host. | Use a docker-socket-proxy that only allows container restart, plus a container-name allowlist. |
-| 9 | "Clear Redis cache" remediation had no cache to clear; "Redis rate limiting" and "caching" were not demonstrated anywhere. | orders-api gets a Redis cache-aside layer and a per-IP rate limiter. |
-| 10 | No scheduled-job coverage beyond the 15s prober. | Celery Beat jobs (nightly ETL rollup, daily SLO digest) with **job-run monitoring** and a "job did not run" alert. |
-| 11 | DEMO_MODE "shrinks windows" but Prometheus rule files are static. | Rules are **generated** from `monitoring/slos.yaml` by a small script; DEMO_MODE is a parameter to the generator. |
-| 12 | Internal call was plain HTTP, giving no exposure to contract-first RPC. | orders-api → payments is **gRPC** (`proto/payments/v1/payments.proto`). |
-| 13 | No AI component. | LLM post-incident reviews and LLM triage of unknown alerts, behind strict guardrails. |
+| 9 | Cron-style jobs were only mentioned in passing. | Celery Beat jobs with **job-run monitoring** and a "job did not run" alert. |
+| 10 | DEMO_MODE "shrinks windows", but Prometheus rule files are static. | Rules are **generated** from `monitoring/slos.yaml` by a small script. DEMO_MODE is a parameter to the generator. |
 
 ## 3. SLOs
 
@@ -60,9 +72,9 @@ Every arrow is a different communication style on purpose. See [docs/learning/00
 |---|---|---|---|
 | orders-api availability (non-5xx ÷ total) | 99.9% | 30 days | ≈ 43.2 min of full downtime |
 | orders-api latency (share of requests < 300 ms) | 95% | 30 days | 5% of requests may be slower |
-| Scheduled-job freshness (last success age < 2× interval) | 100% of runs on time | rolling | any miss alerts |
+| Scheduled-job freshness (last success younger than 2× interval) | every run on time | rolling | any miss alerts |
 
-Alerting is on **burn rate** over two windows (fast and slow) per the Google SRE workbook:
+Alerting is on **burn rate** over two windows (a fast and a slow one), following the Google SRE workbook.
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
@@ -75,68 +87,55 @@ Alerting is on **burn rate** over two windows (fast and slow) per the Google SRE
 
 ## 4. Remediation flow
 
-1. **Receive** Alertmanager webhook (`alertname`, `service`, `fingerprint`, `status`).
-2. **Deduplicate**: ignore if an incident for this fingerprint is open; close it on `resolved`.
+1. **Receive** the Alertmanager webhook (`alertname`, `service`, `fingerprint`, `status`).
+2. **Deduplicate**: ignore if an incident for this fingerprint is open. Close it on `resolved`.
 3. **Diagnose**: deterministic checks against Prometheus (which dependency is failing?).
-4. **Choose runbook**: `alertname` + diagnosis → strategy (RestartContainer, ClearCache, KillIdleDbConnections, Escalate).
-   Unknown alerts go to **AI triage**, which may only pick from the same allowlist.
-5. **Guardrails**: ≤ 3 attempts per 15 min, cooldown, service allowlist. Fail → Escalate.
-6. **Act**: Celery task, via Docker API.
-7. **Verify**: delayed task re-queries the SLI after 60s. Recovered → mitigated. Not → retry or escalate.
+4. **Choose runbook**: `alertname` plus diagnosis → strategy (`RestartContainer`, `KillIdleDbConnections`, `Escalate`).
+5. **Guardrails**: ≤ 3 attempts per 15 minutes, cooldown, container allowlist. Failing a guardrail means Escalate.
+6. **Act**: a Celery task runs the action through the Docker API.
+7. **Verify**: a delayed task re-queries the SLI after 60s. Recovered → mitigated. Not recovered → retry or escalate.
 
-## 5. AI components
+Anything unknown does nothing automatically and escalates to a human. Escalation posts to a configurable webhook URL (default: log only).
 
-Principle: **AI proposes, deterministic code disposes.** The model never executes anything.
-
-| Component | What it does | Guardrails |
-|---|---|---|
-| Post-incident review (PIR) writer | Builds a blameless review (timeline, impact, root cause hypothesis, remediation recommendations) from the incident record, alert history, metric snapshots, and logs. | Output is a *draft*; every claim must cite a timeline entry; run once per incident. |
-| Alert triage | For alerts with no runbook, suggests a diagnosis and one action. | Structured output, action is an **enum of the allowlist**; same attempt limits as any strategy; timeouts and errors fall back to Escalate. |
-| LLM observability | `llm_request_duration_seconds`, `llm_tokens_total`, `llm_errors_total` | The AI component has its own SLIs; call budget per hour. |
-
-Other design rules:
-- Provider-agnostic through LangChain (`init_chat_model`); provider/model come from `.env`.
-- A **fake LLM** is the default in tests and CI, so CI never needs an API key or spends money.
-- Logs and alert labels are **untrusted input** (prompt-injection surface). They are passed as delimited data, and the enum-only output limits the blast radius.
-- Runbooks live in `docs/runbooks/` as Markdown. They are human documentation *and* the context given to the triage model (retrieval without a vector DB; with a handful of runbooks, embeddings would be over-engineering).
-
-## 6. Scheduled jobs
+## 5. Scheduled jobs
 
 Celery Beat runs cron-style schedules:
 
-| Job | Schedule | Purpose |
+| Job | Schedule | What it does |
 |---|---|---|
-| `orders_daily_rollup` | nightly | ETL: aggregate orders into a summary table |
-| `slo_daily_digest` | daily | compute budget remaining, store, optionally notify |
-| `prune_old_incidents` | weekly | housekeeping |
+| `stale_incident_sweeper` | every 5 minutes | Finds incidents stuck open past a threshold and escalates them. |
+| `slo_daily_digest` | daily | Computes error budget remaining and stores it. |
+| `prune_old_incidents` | weekly | Housekeeping. |
 
-Every job records `job_runs` (start, end, status) and exports `job_last_success_timestamp_seconds{job}` and `job_duration_seconds{job}`. The **ScheduledJobMissed** alert catches jobs that silently stopped, the classic failure of cron.
+Every job records a `job_runs` row (start, end, status) and exports `job_last_success_timestamp_seconds{job}` and `job_duration_seconds{job}`. The **ScheduledJobMissed** alert catches jobs that silently stopped, which is the classic failure of cron.
+
+## 6. Incident records and reports
+
+`incidents`: `id, service, alertname, detected_at, mitigated_at, resolved_at, actions_taken, attempts, escalated`
+
+- **MTTD** = alert fired − failure injected
+- **MTTR** = resolved − detected
+- **Auto-fix rate** = mitigated without escalation ÷ total
+
+After each chaos run, a script generates a Markdown incident report: timeline, actions taken, relevant logs (pulled by service and time window), and the fix.
 
 ## 7. Roadmap (one branch per feature, one PR each)
 
 | # | Branch | Deliverable | Done when |
 |---|---|---|---|
 | 0 | `main` | Repo, README, plan, learning log | repo is public |
-| 1 | `feat/proto-contract` | `payments.proto`, compile step, contract test | generated stubs import and round-trip a message |
-| 2 | `feat/services` | orders-api (REST) + payments-service (gRPC) + Postgres, health, JSON logs, request-ID in gRPC metadata, docker-compose | one request shows the same `request_id` in both services' logs |
-| 3 | `chore/ci` | GitHub Actions: lint, pytest, proto compile, image build | green CI badge |
-| 4 | `feat/redis-cache-ratelimit` | cache-aside reads, per-IP rate limiter | repeat GET is a cache hit; burst gets HTTP 429 |
-| 5 | `feat/metrics` | HTTP middleware + gRPC interceptors, Prometheus, Grafana golden signals | traffic moves the graphs |
-| 6 | `feat/slo-alerts` | `slos.yaml` → generated rules, burn-rate alerts, Alertmanager, `promtool` in CI | stopping payments fires an alert |
-| 7 | `feat/remediator` | webhook, dedupe, strategies, Celery, guardrails, delayed verify, socket proxy | killing payments gets it restarted automatically |
-| 8 | `feat/scheduled-jobs` | Celery Beat jobs + job monitoring | pausing Beat fires ScheduledJobMissed |
-| 9 | `feat/chaos-incidents` | fault endpoints, chaos runner, incidents table, MTTD/MTTR | one chaos run produces measured MTTD/MTTR |
-| 10 | `feat/ai-postmortem` | LangChain PIR writer + fake LLM for tests | a chaos run produces a draft PIR automatically |
-| 11 | `feat/ai-triage` | LLM triage for unknown alerts + LLM metrics | unknown alert → allowlisted action or escalation |
-| 12 | `feat/synthetic-prober` | prober, `probe_success`, ProbeFailing | breaking the payment flow fires ProbeFailing while `up == 1` |
-| 13 | `feat/load-testing` | Locust ramp, find and fix one bottleneck | "X req/s before, Y after fixing Z" |
-| 14 | `docs/results` | README results, screenshots, demo video | a stranger runs it in 5 minutes |
-| stretch | `feat/cloud-deploy` | deploy the compose stack to one AWS/GCP VM via GitHub Actions | stack reachable on a cloud VM |
+| 1 | `feat/services` | orders-api + payments-api (FastAPI) + Postgres, `/health/live` and `/health/ready`, JSON logs, request-ID propagation, docker-compose | one request shows the same `request_id` in both services' logs |
+| 2 | `chore/ci` | GitHub Actions: ruff, pytest, image build | green CI badge |
+| 3 | `feat/metrics` | shared metrics middleware, Prometheus scraping, Grafana golden signals | traffic moves the graphs |
+| 4 | `feat/slo-alerts` | `slos.yaml` → generated recording and alert rules, Alertmanager, `promtool` check in CI, SLO dashboard panel | stopping payments fires an alert |
+| 5 | `feat/remediator` | webhook receiver, dedupe, strategies, Celery worker, guardrails, delayed verify, socket proxy | killing payments gets it restarted automatically |
+| 6 | `feat/scheduled-jobs` | Celery Beat, the three jobs above, job-run monitoring | pausing Beat fires ScheduledJobMissed |
+| 7 | `feat/chaos-incidents` | fault endpoints, chaos runner, incidents table, MTTD / MTTR, report generator | one chaos run produces a measured report |
+| 8 | `feat/synthetic-prober` | prober, `probe_success`, ProbeFailing alert and panel | breaking the payment flow fires ProbeFailing while `up == 1` |
+| 9 | `docs/results` | README results table, screenshots, 2-minute demo video | a stranger runs it in 5 minutes |
 
-Core path to a showable project is 1–10 plus 14. 11–13 are extensions.
+About nine sessions of roughly two hours.
 
-## 8. Explicitly out of scope
+## 8. Out of scope
 
-- **LLM fine-tuning.** It needs a dataset and GPU time and does not fit a reliability platform honestly. LLM *integration*, prompt design, structured output, cost and latency control are in scope.
-- **Cloud deployment** is a stretch goal (branch `feat/cloud-deploy`), not core.
-- Kubernetes. Docker Compose is enough to demonstrate every concept here; the plan notes where K8s would differ.
+Anything not in the skills table above, including ETL, gRPC, Redis caching and rate limiting, load testing, LLM features, cloud deployment and Kubernetes. They can be added later as separate branches, but they are not part of this project's definition of done.

@@ -1,35 +1,31 @@
 # Reliability Platform
 
-A small, local, end-to-end **site reliability** platform: it detects failures automatically, measures reliability against SLOs, fixes common failures with zero manual steps, and uses an LLM to help with triage and post-incident reviews, under strict guardrails.
+A small, local, end-to-end **site reliability** platform: it detects failures automatically, measures reliability against SLOs, and fixes common failures with zero manual steps.
 
 > **Status: work in progress.** Built feature by feature, one branch and pull request each. See the [roadmap](#roadmap).
 
 ## What it demonstrates
 
 - **SLIs, SLOs, error budgets, burn-rate alerting** with Prometheus, Alertmanager and Grafana
+- **Structured logging** with a request ID that follows a request across services
+- **Availability monitoring**: health checks, `up`, and a synthetic prober that behaves like a user
 - **Zero-touch remediation**: webhook → runbook strategy → Celery task → verify → escalate, with attempt limits and cooldowns
-- **gRPC** between internal services, contract-first with Protocol Buffers
 - **Monitored scheduled jobs** (Celery Beat): a cron job that silently stops is an incident
-- **Redis** caching and rate limiting
-- **AI-assisted operations** (LangChain): draft post-incident reviews and triage unknown alerts; *AI proposes, deterministic code disposes*
-- **Chaos testing and measured MTTD / MTTR**, **load testing** and capacity findings
-- **CI/CD** with GitHub Actions
+- **Incident response**: incident records, measured MTTD / MTTR, auto-generated incident reports
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  T["Locust + synthetic prober"] -->|REST| O["orders-api (FastAPI)"]
-  O -->|gRPC| PAY["payments-service"]
+  P["Synthetic prober"] -->|REST| O["orders-api (FastAPI)"]
+  O -->|REST| PAY["payments-api (FastAPI)"]
   O --> DB[("PostgreSQL")]
-  O --> RC[("Redis")]
   PROM["Prometheus"] -.->|scrape| O
   PROM -.->|scrape| PAY
   PROM --> AM["Alertmanager"] -->|webhook| REM["remediator"]
   REM --> W["Celery worker + Beat"]
   W -->|Docker API| O
   W -->|Docker API| PAY
-  W -->|HTTPS| LLM["LLM provider"]
   GR["Grafana"] --> PROM
 ```
 
@@ -47,26 +43,21 @@ Full details, design decisions and the reasoning behind them: [docs/PLAN.md](doc
 | # | Feature | Branch | Status |
 |---|---|---|---|
 | 0 | Repo foundation, plan, learning log | `main` | ✅ |
-| 1 | Protobuf contract + compile step | `feat/proto-contract` | 🚧 |
-| 2 | Services (REST + gRPC), Postgres, Compose | `feat/services` | ⬜ |
-| 3 | CI | `chore/ci` | ⬜ |
-| 4 | Redis cache + rate limiter | `feat/redis-cache-ratelimit` | ⬜ |
-| 5 | Metrics + dashboards | `feat/metrics` | ⬜ |
-| 6 | SLO rules + alerting | `feat/slo-alerts` | ⬜ |
-| 7 | Remediator + Celery | `feat/remediator` | ⬜ |
-| 8 | Scheduled jobs + job monitoring | `feat/scheduled-jobs` | ⬜ |
-| 9 | Chaos + incident records (MTTD/MTTR) | `feat/chaos-incidents` | ⬜ |
-| 10 | AI post-incident reviews | `feat/ai-postmortem` | ⬜ |
-| 11 | AI alert triage | `feat/ai-triage` | ⬜ |
-| 12 | Synthetic prober | `feat/synthetic-prober` | ⬜ |
-| 13 | Load testing + capacity | `feat/load-testing` | ⬜ |
-| 14 | Results + demo | `docs/results` | ⬜ |
+| 1 | Services, Postgres, health checks, JSON logs, Compose | `feat/services` | ⬜ |
+| 2 | CI | `chore/ci` | ⬜ |
+| 3 | Metrics + dashboards | `feat/metrics` | ⬜ |
+| 4 | SLO rules + alerting | `feat/slo-alerts` | ⬜ |
+| 5 | Remediator + Celery | `feat/remediator` | ⬜ |
+| 6 | Scheduled jobs + job monitoring | `feat/scheduled-jobs` | ⬜ |
+| 7 | Chaos + incident records (MTTD/MTTR) | `feat/chaos-incidents` | ⬜ |
+| 8 | Synthetic prober | `feat/synthetic-prober` | ⬜ |
+| 9 | Results + demo | `docs/results` | ⬜ |
 
 ## Running it
 
 Not runnable end-to-end yet. Each feature PR adds its own run instructions here.
 
-Configuration lives in a local `.env` (copy `.env.example`). `.env` is git-ignored; never commit keys.
+Configuration lives in a local `.env` (copy `.env.example`). `.env` is git-ignored; never commit secrets.
 
 ## Learning log
 
