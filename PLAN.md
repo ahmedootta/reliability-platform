@@ -30,6 +30,7 @@ flowchart LR
 | Language / server | Python + FastAPI | Simple, async, auto docs at `/docs` |
 | AI API | Groq (`groq` SDK): free tier, no card, open-source models. Two tiers: **light** `openai/gpt-oss-20b` and **heavy** `openai/gpt-oss-120b` | Swappable: the whole AI call lives in one file |
 | Fake mode | `AI_PROVIDER=fake` | Lets us learn and test without using free-tier quota or needing a key |
+| API docs | **Swagger UI**, built into FastAPI at `/docs` (generated from our routes and Pydantic models; ReDoc at `/redoc`) | Documentation that cannot go out of date, plus a place to try every endpoint |
 | Metrics SDK | `prometheus_client` (official Python client) | The standard way to instrument a Python service |
 | Prometheus + Grafana | Docker Compose | One command to start everything |
 
@@ -40,7 +41,8 @@ app/
   main.py         # Part 1: FastAPI app + routes
   config.py       # Part 1: reads settings and the API key from .env
   ai_client.py    # Part 1: the ONLY file that talks to the AI API
-  router.py       # Part 1: maps tier (light/heavy) to a model name
+  model_selector.py  # Part 1: job -> tier -> model name (classify=light, analyze=heavy)
+  errors.py       # Part 1: our one JSON error shape (404, 405, AI errors)
   metrics.py      # Part 2: metric definitions
 tests/            # Part 1+: tests run in fake mode
 monitoring/
@@ -66,18 +68,19 @@ Each part follows the same loop:
 
 ## Part 1: AI API server
 
-**Goal:** `POST /ask {"prompt": "..."}`. The server adds the API key, calls the AI API, and returns the answer, or a clear failure.
+**Goal:** two job endpoints, `POST /classify` (always the **light** model) and `POST /analyze` (always the **heavy** model). The server adds the API key, calls the AI API, and returns the result, or a clear failure.
 
 | Step | What | Done when |
 |---|---|---|
 | 1.1 | Project skeleton: venv, FastAPI, `GET /health`, first test | `curl localhost:8000/health` → `{"status":"ok"}` |
-| 1.2 | Config and secrets: `.env`, `config.py`, key never logged or returned | Server refuses to start in real mode without a key |
-| 1.3 | `ai_client.py`: one Groq client created once and reused, the model and parameters passed per call, plus fake mode. Verify the model name with `GET /models` | `/ask` returns a real (or fake) answer |
-| 1.4 | **Model routing**: each request has a `tier` (`light` or `heavy`). A small router function maps the tier to a model from `.env`. Light is for cheap, simple jobs (classify, short answers); heavy is for harder jobs (reasoning, long answers) | `/ask` with `tier=light` and `tier=heavy` uses different models, and the response says which |
+| 1.2 | Config and secrets: `.env`, `config.py`, key never logged or returned, plus a custom JSON 404/405 | Server refuses to start in real mode without a key |
+| 1.3 | `ai_client.py`: one Groq client created once and reused, the model and parameters passed per call, plus fake mode. Verify the model name with `GET /models` | a fake (then real) call works from the model client |
+| 1.4 | **Job endpoints and model selection**: `routes/classify.py` (light) and `routes/analyze.py` (heavy). Each endpoint has its own job prompt and token cap. `model_selector.py` maps job → tier → model name from `.env`. This replaces the temporary `/ask` stub | `POST /classify` and `POST /analyze` use different models, and the response says which |
 | 1.5 | Failure handling: timeout, bad key (401), rate limit (429), upstream 5xx → clean JSON errors with sensible HTTP codes | Each failure is reproducible by hand |
 | 1.6 | Tests in fake mode (including routing and each failure) | `pytest` passes |
+| 1.7 | **Document the API with Swagger UI**: summaries and descriptions on routes, tag descriptions, example request and response bodies, and the error responses (`responses={...}`) for 400/429/502/504 | Someone who never saw the code can use every endpoint from `/docs` |
 
-**Concepts:** light vs heavy model routing (cost, speed, quality trade-off, why real systems do it) · HTTP request/response lifecycle · why the key stays on the server · env vars vs hard-coded secrets · sync vs async calls · timeouts and retries with backoff · mapping upstream errors to our status codes (502/503/504) · tokens and cost.
+**Concepts:** Swagger UI / OpenAPI · async vs sync request handling · custom error handlers · light vs heavy model routing (cost, speed, quality trade-off, why real systems do it) · HTTP request/response lifecycle · why the key stays on the server · env vars vs hard-coded secrets · sync vs async calls · timeouts and retries with backoff · mapping upstream errors to our status codes (502/503/504) · tokens and cost.
 
 ---
 
@@ -88,7 +91,7 @@ Each part follows the same loop:
 | Step | What | Done when |
 |---|---|---|
 | 2.1 | Install `prometheus_client`, expose `GET /metrics` | You can read raw metrics text in the browser |
-| 2.2 | Define metrics in `metrics.py` (table below) and record them in the code paths | Numbers move when you call `/ask` |
+| 2.2 | Define metrics in `metrics.py` (table below) and record them in the code paths | Numbers move when you call `/classify` or `/analyze` |
 | 2.3 | Run Prometheus in Docker and scrape the server | Target shows **UP** at `localhost:9090/targets` |
 | 2.4 | PromQL basics in the UI and the CLI (`curl` the HTTP API, `promtool`) | You can answer "how many failures in the last 5 min?" |
 | 2.5 | Logs vs metrics: add simple structured (JSON) logs and see what each one is for | You can explain when to use which |

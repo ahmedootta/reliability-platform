@@ -17,7 +17,7 @@ It was built step by step to learn the flow and the concepts behind each piece.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env              # then fill in your key
-uvicorn app.main:app --reload     # http://localhost:8000/docs
+uvicorn app.main:app --reload     # Swagger UI: http://localhost:8000/docs
 pytest
 ```
 

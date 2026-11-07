@@ -220,6 +220,8 @@ Rules for how a request finds its route:
 
 ### Business logic of `/ask` (design before coding)
 
+> **Update 2026-11-08:** the endpoint now decides the tier, so there is no `tier` field in the request and no `auto`. `/ask` is replaced by `POST /classify` (light) and `POST /analyze` (heavy); `GET /ask/{job_id}` is deleted. The flow below is otherwise unchanged: validate, select model, call the provider with a timer, map result or error, respond. Read "ask" as "the job endpoint".
+
 #### The job in one sentence
 A client sends a prompt and a tier. Our server picks the model, calls the AI API with **our** key, and returns either the answer plus facts about the call, or a clear error that says what went wrong.
 
@@ -316,6 +318,39 @@ Retries: the SDK already retries 2 times by default (429, 5xx, connection errors
 5. `routes/ask.py`: wire it together.
 6. Failure mapping, then tests for each failure in fake mode.
 
+#### Who decides light or heavy, and why a separate file?
+
+**Two different jobs hide inside "routing":**
+1. **Choose the tier** (light or heavy): *the decision*. This is the part that can get smart.
+2. **Turn the tier into a model name** (`light` -> `openai/gpt-oss-20b` from settings): *the lookup*. This part is trivial.
+
+Ways to make the decision:
+
+| Option | How | Good | Bad |
+|---|---|---|---|
+| A. Client chooses | Request field `tier` | Simplest. The caller knows the job | Callers can pick `heavy` for everything and burn the quota |
+| B. Per endpoint or job type | e.g. `/classify` always light, `/analyze` always heavy | Most common in real products: the **job** decides, not the prompt | More routes |
+| C. Server rules ("auto") | Prompt length, keywords | Client doesn't care | Length is a crude guess for difficulty |
+| D. Classifier call | A light model rates difficulty first | Smarter | An extra call: more latency and cost |
+| E. Cascade | Try light, escalate to heavy on failure or low quality | Saves money | Complex, slower in the bad case |
+
+**Recommendation for this project:** `tier` is `"light"`, `"heavy"` or `"auto"` (default `auto`). Auto uses a tiny rule: long prompts (over about 500 characters) or reasoning words ("explain why", "step by step", "compare", "analyze") go heavy, everything else goes light. It is crude on purpose: we learn the pattern and can see in Grafana whether the rule sends too much to heavy. Rule of thumb: the explicit `light`/`heavy` options (A) stay available, and in a real system job type (B) usually beats guessing from the text.
+
+**Important for Part 2:** the metric label `tier` must hold the **resolved** tier (light or heavy), never `auto`. A label of `auto` would tell us nothing about cost or speed.
+
+**Why a separate file for this?** Honest answer: the lookup alone (3 lines) does not need one. The file earns its place because of the decision part:
+- the rules will grow (keywords, length limits, maybe fallback from heavy to light when Groq returns 429);
+- it is **pure logic with no HTTP and no Groq**, so it is trivial to unit-test with plain inputs;
+- the route stays short and `ai_client.py` stays about talking to Groq.
+
+**Name warning:** `router.py` is easy to confuse with FastAPI's `APIRouter` (our `routes/` folder). Better name: **`model_selector.py`** with `choose_tier(prompt, requested_tier)` and `model_for(tier, settings)`. If you prefer fewer files, put both functions inside `ai_client.py` for now and split later when the rules grow. Both are fine; the principle that matters is that **the route does not contain the rules**.
+
+**Decision (2026-11-08): option B, one endpoint per job.**
+- `POST /classify` always uses **light**. `POST /analyze` always uses **heavy**. The caller cannot override it, so nobody can burn the heavy quota by choosing it for everything.
+- Each endpoint owns its job prompt and its token cap (classify: short; analyze: long), so each also has its own latency and cost profile. That is what we compare in Grafana.
+- `model_selector.py` stays a separate file: it holds the job → tier → model mapping in one place, with no HTTP and no Groq, so it is easy to test. Adding a third job later (say `/summarize` on light) is one new route plus one line there.
+- The metric label `tier` stays (light or heavy); the route label already tells us which endpoint.
+
 ### Step 1.1: skeleton and `/health`
 
 #### The flow
@@ -340,6 +375,211 @@ uvicorn app.main:app --reload      # then open http://localhost:8000/docs
 pytest                             # run the tests
 ```
 
+### Step 1.2: config and secrets
+
+#### The flow
+1. At startup (or the first time a route asks), `get_settings()` builds a `Settings` object once.
+2. pydantic-settings reads **environment variables first, then the `.env` file**. `AI_PROVIDER` fills `ai_provider`, and so on (names are case-insensitive).
+3. Each value is converted and checked: `AI_TIMEOUT_SECONDS="30"` becomes the number `30.0`, `AI_PROVIDER` must be `fake` or `groq`.
+4. A validator adds one business rule: if the provider is `groq` and the key is empty, **raise an error** and the server refuses to start. Failing loudly at startup is better than failing on the first user request.
+5. `lru_cache` makes every later `get_settings()` call return the same object, so `.env` is read once.
+
+#### Where it lives in the code
+| File | Responsibility |
+|---|---|
+| [app/config.py](app/config.py) | `Settings` class and `get_settings()` |
+| [tests/test_config.py](tests/test_config.py) | Defaults, missing key, hidden key, bad provider, number parsing |
+
+#### Concepts
+- **Config from the environment (12-factor style):** code is the same everywhere; only the environment differs (your laptop, CI, a server).
+- **Precedence:** real environment variable beats `.env`. That is how a server or CI injects secrets without a file.
+- **`SecretStr`:** printing or logging the settings shows `**********`, not the key. You must call `.get_secret_value()` on purpose to read it. This is cheap protection against leaking the key in a log.
+- **`extra="ignore"`:** unknown lines in `.env` (such as the old `AI_MODEL`) do not crash the app.
+- **Fail fast:** a bad config should stop the process at startup.
+- **How to use it in a route later:** `settings: Settings = Depends(get_settings)`. Tests can replace it with `app.dependency_overrides`.
+
+#### Gotchas
+- Tests call `Settings(_env_file=None)` and clear the `AI_*` variables with `monkeypatch`. Otherwise your real `.env` (provider `groq`, real key) would leak into the tests and make them depend on your machine.
+- **`config.py` "does not read `.env`":** `env_file=".env"` is relative to the folder you *launch from*. From the project root it worked. From any other folder pydantic-settings does not complain: the file is simply not found, and the **defaults silently win** (`fake`, no key). Fix: `ENV_FILE = Path(__file__).resolve().parent.parent / ".env"`, an absolute path anchored to the file's own location. Checked from `app/` and from `~`.
+- Related traps when "`.env` is ignored": (1) a real environment variable with the same name beats `.env`; (2) `Settings()` does **not** fill `os.environ`, so `os.getenv("AI_API_KEY")` is `None` even though `settings.ai_api_key` works. Always read values through `get_settings()`; (3) typos in the name are silently ignored because of `extra="ignore"`.
+
+### Custom 404 (route not found): backend or frontend?
+
+It is the **backend's** job. The frontend cannot change what the API answers. A frontend may show its own "page not found" screen, but for an API the response itself must be a clean, predictable JSON error that any client (a browser app, a script, `curl`) can parse. If we do nothing, FastAPI returns `{"detail":"Not Found"}`, which does not match our error shape.
+
+**Why the catch-all route (`@router.get("*")`) does not work**
+1. `"*"` is not a wildcard in FastAPI. It is read as the literal path `*`, so `GET /nothing` still returned the default 404. (We tested it.)
+2. Even a working catch-all would only catch `GET`. `POST /nothing` and `DELETE /nothing` would still hit the default.
+3. It would answer **200** for a missing page. The status code must stay **404**.
+4. It would show up in `/docs`, and in Part 2 it would pollute the metrics.
+5. It returned a Python set (`{"..."}`), which cannot be turned into JSON.
+
+**The right way: an exception handler**
+When no route matches, FastAPI/Starlette raises an HTTP exception with status 404. A handler lets us decide what to send back.
+```python
+# app/errors.py
+async def http_exception_handler(request, exc):
+    return JSONResponse(status_code=exc.status_code,
+                        content={"error": {"type": "not_found", "message": "..."}})
+
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+```
+- It works for every method and every path, and keeps the real 404 status.
+- It also covers **405** (known path, wrong method) and any `raise HTTPException(...)` we write ourselves, so the whole API shares one error shape. Handle `StarletteHTTPException`, not FastAPI's subclass, or the router's own 404s would be missed.
+- Still to unify later: **422** validation errors (`RequestValidationError`). We will do it in step 1.5 with the AI errors.
+- Tests: [tests/test_errors.py](tests/test_errors.py).
+
+### How `config.py` works end to end (and how `main.py` uses it)
+
+#### What `config.py` makes
+It turns "text lines in a file" into **one typed Python object** that the rest of the app asks for.
+
+```
+.env file ──┐
+            ├─> pydantic-settings ─> convert + validate ─> Settings object ─> get_settings() ─> main.py / routes
+real env ───┘   (env vars win)        ("30" -> 30.0,        (cached, one copy)
+                                       bad provider -> error,
+                                       groq + no key -> error)
+```
+
+| Piece in `config.py` | What it does |
+|---|---|
+| `ENV_FILE = Path(__file__)...parent.parent / ".env"` | Absolute path to the project's `.env`, whatever folder you start from |
+| `class Settings(BaseSettings)` | Each field is one setting. Field `ai_provider` reads variable `AI_PROVIDER` (name match ignores case) |
+| `model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")` | Where to read, and ignore unknown lines |
+| Field types and defaults | `float` converts text to a number, `Literal["fake","groq"]` rejects anything else, the default is used when the variable is missing |
+| `@model_validator` | Our own rule: provider `groq` needs a key |
+| `get_settings()` + `@lru_cache` | Builds `Settings` the first time, then returns the **same object** every time |
+
+Order of lookup for each field: real environment variable, then the `.env` file, then the default in the class.
+
+#### How `main.py` reads it
+`main.py` reads it in **two places**:
+
+1. **At startup, to fail fast.** `lifespan` is code that runs once when uvicorn starts the app (before the first request) and once at shutdown (after `yield`). It calls `get_settings()`, so a bad config stops the server right there, with `Application startup failed. Exiting.` Before this change **nothing** read the config at startup, so a missing key would only have shown up on the first request. (We tested it with real uvicorn.)
+2. **In routes and the AI client, to use the values.** Not written yet (step 1.3). The pattern:
+```python
+from fastapi import Depends
+from app.config import Settings, get_settings
+
+@router.post("")
+async def ask(body: AskRequest, settings: Settings = Depends(get_settings)):
+    model = settings.ai_model_light      # the route never reads .env itself
+```
+`Depends(get_settings)` makes FastAPI call the function (it returns the cached object) and pass the result in. In tests we swap it with `app.dependency_overrides[get_settings] = lambda: fake_settings`, with no `.env` needed.
+
+Rules: **only `config.py` touches `.env`**. Everything else receives a `Settings` object. That is why `os.getenv(...)` appears nowhere in the project.
+
+### Middleware (where is it configured, and when does it run?)
+
+**Middleware is code that wraps every request**, running before the route and again after it. It is configured **in `main.py`, on the `app` object**: it is part of the app, not of uvicorn.
+
+```python
+@app.middleware("http")                       # simple way: a decorator
+async def timing(request, call_next):
+    start = time.perf_counter()               # 1. runs BEFORE the route
+    response = await call_next(request)       # 2. hands the request on (next middleware, then the route)
+    ms = (time.perf_counter() - start) * 1000 # 3. runs AFTER the route, on the way back
+    response.headers["X-Process-Time-Ms"] = f"{ms:.0f}"
+    return response
+
+# or add a ready-made class (CORS, GZip, our own):
+app.add_middleware(SomeMiddlewareClass, option=value)
+```
+
+**About your question "before it reaches uvicorn or the routes":** uvicorn is **first**. It receives the connection and parses the HTTP, then calls the app. Middleware sits **inside the app, after uvicorn and before the routes**:
+
+```
+client -> uvicorn -> [ middleware 2 -> middleware 1 -> exception handlers -> router -> ROUTE ] -> back out the same way
+                      \_____________________ inside our `app` object ____________________/
+```
+- Middleware can **read or reject a request before any route runs**, and **change the response on its way out**.
+- It is an onion: the **last one added is the outermost**. We tested two:
+
+| Step | Order we observed for `GET /hi` |
+|---|---|
+| 1 | second, before |
+| 2 | first, before |
+| 3 | ROUTE runs |
+| 4 | first, after |
+| 5 | second, after |
+
+- It also runs for **unknown routes**: `GET /missing` went through both middlewares and then returned the 404. That matters for Part 2: metrics in middleware count 404s too.
+- **What it is used for:** timing, request ids, logging, CORS, compression, authentication checks, and in Part 2 the `http_requests_total` metric.
+- **Middleware vs dependency (`Depends`):** middleware wraps *every* request without the route knowing. `Depends` is chosen per route and can hand a value into the function (like settings). Cross-cutting and global: middleware. Needs a value in this route: `Depends`.
+- **Do not use blocking code in middleware** (same rule as `async def` routes).
+
+### Swagger UI in our app
+
+**There is nothing to install.** FastAPI builds Swagger UI from your code.
+
+| URL | What it is |
+|---|---|
+| `/docs` | **Swagger UI**: interactive. Open a route, click **Try it out**, send a real request |
+| `/redoc` | ReDoc: the same information as a read-only reference page |
+| `/openapi.json` | The machine-readable **OpenAPI** description. Both pages above are drawn from it. Tools (Postman, client generators) can import it |
+
+How it is generated: FastAPI reads our routes, their paths and methods, the Pydantic models, and the status codes, and writes them into `/openapi.json`. The docs can never be out of date because they come from the same code that runs.
+
+What we configured in [app/main.py](app/main.py): `title`, `version`, a markdown `description`, and `openapi_tags` (a description for each tag, which is where `tags=["ask"]` pays off). In [app/routes/health.py](app/routes/health.py) we added a route `summary` and `description`.
+
+Still to do in **step 1.7**, once `/ask` has real models: request and response examples, and the error responses (`responses={...}` for 400, 429, 502, 504), so Swagger shows what a failure looks like. Pydantic models drive it: `Field(description=..., examples=[...])` on each field.
+
+**Built in, or embedded by us?** Built in. Two separate things:
+- **OpenAPI** is a standard format for describing an API. FastAPI **generates** it from our code (`/openapi.json`). This is the real "documentation".
+- **Swagger UI** is a separate open-source JavaScript app (from the Swagger/OpenAPI project) that draws OpenAPI as an interactive page. FastAPI does not contain its code: `/docs` returns a small HTML page, and that page loads `swagger-ui-bundle.js` and `swagger-ui.css` from `cdn.jsdelivr.net` (we checked the page source). So **`/docs` needs internet access in the browser**. Offline, the page is blank; the fix is to serve the files ourselves with `get_swagger_ui_html(...)` and static files. `/redoc` works the same way (also a CDN script).
+- It is a **description of the contract**, not a monitor. It does not count calls or errors. Tracking real traffic is what Prometheus and Grafana do in Parts 2 and 3.
+
+Note: Swagger UI is public here. Real services often disable it in production (`docs_url=None`) or protect it.
+
+### What is Starlette?
+
+**Starlette is the lightweight ASGI web toolkit that FastAPI is built on.** FastAPI is Starlette plus extra features on top.
+
+| Layer | Provided by |
+|---|---|
+| Network server (port, HTTP parsing) | uvicorn |
+| Routing, request/response objects, middleware, exception handling, `TestClient`, `JSONResponse`, `HTTPException` base | **Starlette** |
+| Type-hint validation (Pydantic), dependency injection (`Depends`), automatic OpenAPI and Swagger UI | **FastAPI** (added on top) |
+
+```
+uvicorn -> FastAPI (class FastAPI(Starlette)) -> Starlette routing/middleware -> your function
+```
+- `FastAPI` literally subclasses `Starlette`. Everything Starlette can do, FastAPI can do.
+- You already used it: `from fastapi.testclient import TestClient` is Starlette's test client; `from starlette.exceptions import HTTPException as StarletteHTTPException` is the 404/405 handler in `errors.py`.
+- **Why `errors.py` imports from `starlette`, not `fastapi`:** FastAPI's `HTTPException` is a subclass of Starlette's. The router raises Starlette's version for unknown routes (404) and wrong methods (405). A handler registered for FastAPI's subclass would miss them. A handler for the **parent** catches both.
+- **Middleware** (code that wraps every request, such as timing or metrics in Part 2) is also a Starlette feature.
+
+### Sync vs async: what changes for a request and a response?
+
+**From the client's side: nothing.** The same request goes in, the same JSON comes back, and one single request takes the same time. The difference is inside the server, in **what it does while waiting** for something slow, like our AI API call (maybe 1 to 5 seconds).
+
+The waiter picture:
+- **Sync (`def`)**: one waiter per table. FastAPI runs each `def` route in a thread from a pool (about 40 threads). While the AI call is slow, that thread just stands there. Request 41 has to wait for a free thread.
+- **Async (`async def` + `await`)**: one waiter serves many tables. At every `await`, the route says "wake me up when the answer arrives" and the event loop immediately serves other requests.
+
+| | `def` (sync) | `async def` + `await` |
+|---|---|---|
+| Who runs it | A thread from a pool (about 40) | The event loop, one thread |
+| While waiting for the AI | The thread is stuck, doing nothing | The route pauses, others run |
+| Limit on concurrent waits | About the thread count | Thousands |
+| Needs | Any normal library | An async library (`AsyncGroq`, `httpx.AsyncClient`) |
+| Best for | Blocking libraries, simple code | Waiting on the network (our case) |
+
+**We measured it** (50 requests at the same time, each waiting 0.2 s, one uvicorn process):
+
+| Route | Total time |
+|---|---|
+| `def` + `time.sleep` | 0.51 s |
+| `async def` + `await asyncio.sleep` | 0.37 s |
+| `async def` + `time.sleep` (**the trap**) | **10.11 s** |
+
+- At 50 requests the gap between sync and async is small, because a thread pool of about 40 copes. It grows as concurrency grows and as threads run out.
+- Async does **not** make one request faster, and it does not help CPU-heavy work.
+- **The golden rule:** never call a blocking function (`time.sleep`, `requests.get`, the sync `Groq` client) inside `async def`. The event loop is one thread, so it freezes **every** request at once. Result: 50 x 0.2 s = 10 s, which is worse than plain `def`.
+- Honest caveat for this project: Groq's free tier allows only about 30 requests a minute, so real throughput will be capped by Groq whichever style we use. We choose async because it is the correct habit for I/O-bound services, it makes the "in-flight requests" gauge in Part 2 meaningful, and we can show the difference in the dashboard.
+- Practical rule: **`async def` + an async client**, or plain **`def` + a sync client**. Never mix an async route with a sync client.
+
 ### Concepts
 - **Why a venv:** `.venv/` keeps this project's packages separate from the rest of your system.
 - **Why `/health`:** a cheap endpoint that says "the process is up". Monitoring tools and Docker use it. It is a different thing from "the AI API works".
@@ -347,10 +587,32 @@ pytest                             # run the tests
 - **One client, reused:** the Groq client holds the key, the connection pool, the timeout and the retries, so it is created **once** at startup and reused. Model, `temperature` and `max_completion_tokens` are arguments to each call, so they can change per request. Change the key in `.env` and you restart the server.
 
 ### Gotchas
+- `@router.get("*")` is not a catch-all in FastAPI (literal path `*`). Use an exception handler for 404.
+- `APITimeoutError` is a subclass of `APIConnectionError`: catch the timeout first.
 - `pytest` failed with `No module named 'app'` until `pytest.ini` added `pythonpath = .`. Pytest does not add the project root to the import path by default.
 - `.env` values have no quotes and no spaces around `=`.
 
 ### Your questions
+- **Q: Is Swagger built into FastAPI to track APIs and make interactive docs, or do we embed it ourselves?**
+  A: Built in. FastAPI generates the OpenAPI description (`/openapi.json`) from our routes and models, and serves a small HTML page at `/docs` that loads the open-source Swagger UI from a CDN. It documents the API contract; it does not track live traffic (that is Prometheus in Part 2). See "Swagger UI in our app".
+- **Q: Can the endpoint decide the model (`/classify` light, `/analyze` heavy)?**
+  A: Yes, it is option B and now our decision. See "Who decides light or heavy".
+- **Q: Based on what do we use light or heavy, and why do we need a file just for routing?**
+  A: Options are client-chosen, per job type, server rules ("auto"), a classifier call, or a cascade. Recommended: `tier` = light | heavy | auto, with a crude length/keyword rule for auto, and the metric label always the resolved tier. A separate file is justified by the decision rules (they grow, and are pure and testable), not by the 3-line lookup; rename it `model_selector.py` to avoid confusion with FastAPI routers.
+- **Q: Is Swagger in our application?**
+  A: Yes, FastAPI includes it at `/docs` (also `/redoc` and `/openapi.json`). We added app metadata and tag descriptions; examples and error responses come in step 1.7.
+- **Q: What does `config.py` do, how does it read `.env`, and how does `main.py` read it?**
+  A: It builds one typed, validated `Settings` object from real env vars, then `.env`, then defaults. `main.py` calls `get_settings()` in `lifespan` at startup to fail fast; routes get it with `Depends(get_settings)` (step 1.3). Only `config.py` touches `.env`.
+- **Q: Where are middlewares configured, and do they run before uvicorn or the routes?**
+  A: In `main.py` on the `app` (`@app.middleware("http")` or `app.add_middleware`). uvicorn is first; middleware runs inside the app after uvicorn and before the routes, and again on the way out. Last added is outermost, and 404s pass through too.
+- **Q: Why does `config.py` not read `.env`?**
+  A: It did only when started from the project root. `env_file=".env"` is relative to the launch folder, and a missing file is silently ignored, so defaults won. Reproduced from `app/` and `~`, fixed with an absolute `ENV_FILE` path plus a test.
+- **Q: What is Starlette?**
+  A: The ASGI toolkit FastAPI is built on (routing, middleware, request/response, exceptions, test client). FastAPI adds Pydantic validation, `Depends`, and OpenAPI/Swagger.
+- **Q: What is the difference between async and sync in a request and response?**
+  A: None for the client. Inside the server, sync holds a thread while waiting for the AI, and async pauses the route so one thread serves many waiting requests. Measured: 50 concurrent 0.2 s requests took 0.51 s (sync), 0.37 s (async), and 10.11 s when a blocking call sat inside `async def`.
+- **Q: How do I return a custom message for any route that does not exist? Is that the frontend's job?**
+  A: It is the backend's job. Register an exception handler for `StarletteHTTPException` (see `app/errors.py`). A `GET "*"` route does not work: it is not a wildcard, only catches GET, and would answer 200.
 - **Q: What is the business logic and flow of asking the AI, before coding?**
   A: See "Business logic of `/ask` (design before coding)": validate, route tier to model, call provider with timer, map result or error, respond. Layers keep Groq out of the route.
 - **Q: What are `prefix` and `tags` in `APIRouter(prefix="/ask", tags=["ask"])`?**
