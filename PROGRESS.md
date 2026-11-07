@@ -44,3 +44,6 @@ Status key: ⬜ not started · 🚧 in progress · ✅ done
 | 2026-11-04 | Reset the project and wrote the new plan, progress, and learning files | – |
 | 2026-11-05 | Chose Groq (`openai/gpt-oss-20b`), set up `.env`, built step 1.1 (venv, FastAPI, `/health`, test), wrote the FastAPI revision | One client or many? (answered: one, reused) |
 | 2026-11-05 | Added light/heavy model routing to the plan (step 1.4); wrote "how to create a FastAPI project" in LEARNING.md; committed and pushed | – |
+| 2026-11-05 | Explained uvicorn, the app entry point, and APIRouter routing; added to LEARNING.md | – |
+| 2026-11-07 | Explained `prefix` and `tags` of `APIRouter`; added to LEARNING.md. You will create the routers folder yourself | – |
+| 2026-11-07 | Committed your routers. Designed the `/ask` business logic (contract, flow, layers, failure mapping, decisions) in LEARNING.md before coding | Confirm decisions: async + AsyncGroq, no streaming, drop `GET /ask/{job_id}` |
