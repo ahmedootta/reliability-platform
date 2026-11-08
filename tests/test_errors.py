@@ -23,5 +23,5 @@ def test_swagger_ui_and_openapi_are_served():
     assert client.get("/docs").status_code == 200
     schema = client.get("/openapi.json").json()
     assert schema["info"]["title"] == "AI API Server"
-    assert {t["name"] for t in schema["tags"]} == {"health", "ask"}
+    assert {t["name"] for t in schema["tags"]} == {"health", "classify", "analyze"}
     assert "/health" in schema["paths"]

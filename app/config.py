@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     ai_model_light: str = "openai/gpt-oss-20b"
     ai_model_heavy: str = "openai/gpt-oss-120b"
     ai_timeout_seconds: float = 30
+    ai_max_retries: int = 1  # worst case wait = timeout x (1 + retries)
 
     @model_validator(mode="after")
     def key_required_for_real_provider(self):

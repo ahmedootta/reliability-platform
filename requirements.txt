@@ -4,3 +4,4 @@ groq
 pydantic-settings
 pytest
 httpx
+pytest-asyncio

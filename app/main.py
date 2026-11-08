@@ -2,18 +2,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.ai_client import AIClient
 from app.config import get_settings
 from app.errors import register_exception_handlers
-from app.routes import ask, health
+from app.routes import analyze, classify, health
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Runs once when the server starts. Building the settings here makes a bad
     # config (e.g. AI_PROVIDER=groq without a key) stop the server immediately.
-    get_settings()
+    settings = get_settings()
+    app.state.ai_client = AIClient(settings)  # one client, reused by every request
     yield
-    # Code after `yield` runs once at shutdown (close clients, etc.)
+    # Code after `yield` runs once at shutdown
+    await app.state.ai_client.aclose()
 
 
 DESCRIPTION = """
@@ -26,7 +29,8 @@ A small server that sits between a client and an AI API.
 
 TAGS = [
     {"name": "health", "description": "Is the server process up?"},
-    {"name": "ask", "description": "Send a prompt to the AI and get the answer back."},
+    {"name": "classify", "description": "Pick one label for a text. Always uses the light model."},
+    {"name": "analyze", "description": "Analyse a text in depth. Always uses the heavy model."},
 ]
 
 app = FastAPI(
@@ -40,4 +44,5 @@ app = FastAPI(
 register_exception_handlers(app)
 
 app.include_router(health.router)
-app.include_router(ask.router)
+app.include_router(classify.router)
+app.include_router(analyze.router)
