@@ -6,9 +6,10 @@ This is a **learning project**: a small AI API server, monitored by Prometheus, 
 
 1. **Always update the docs after any change.** After any step, code change, decision, or answered question, update both:
    - [PROGRESS.md](PROGRESS.md): tick the finished step and add a row to the session log.
-   - [LEARNING.md](LEARNING.md): add the flow, where it lives in the code, concepts, gotchas, and the user's questions with answers.
+   - [LEARNING.md](LEARNING.md): put the flow, code location, concepts, and gotchas in the topic section they belong to, and add a one-line entry to the questions index for each question the user asked.
 
    Do this in the same piece of work as the change, not later.
+2. **Keep the docs short.** Each fact lives in one place. Update the existing section instead of appending a new one. LEARNING.md is organised by topic, not by date, and holds the answers (its questions index only points to them). The session log in PROGRESS.md has one row per day or milestone. Before adding text, check whether it is already there.
 
 ## Working style
 

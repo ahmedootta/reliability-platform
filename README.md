@@ -1,11 +1,6 @@
 # Reliability Platform (learning project)
 
-A small server that calls an AI API, is monitored with **Prometheus**, and is visualised in **Grafana**.
-It was built step by step to learn the flow and the concepts behind each piece.
-
-1. **AI API server**: the server holds the API key and calls the AI API (request → response, success or failure)
-2. **Prometheus**: the server exposes metrics; Prometheus scrapes and stores them
-3. **Grafana**: a KPI dashboard on top of Prometheus, plus reading insights from it
+A small FastAPI server that calls an AI API (two job endpoints: `/classify` on a light model, `/analyze` on a heavy one), is monitored with **Prometheus**, and is visualised in **Grafana**. Built step by step to learn the flow and the concepts.
 
 - Plan: [PLAN.md](PLAN.md)
 - Progress: [PROGRESS.md](PROGRESS.md)

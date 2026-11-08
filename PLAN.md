@@ -30,7 +30,7 @@ flowchart LR
 | Language / server | Python + FastAPI | Simple, async, auto docs at `/docs` |
 | AI API | Groq (`groq` SDK): free tier, no card, open-source models. Two tiers: **light** `openai/gpt-oss-20b` and **heavy** `openai/gpt-oss-120b` | Swappable: the whole AI call lives in one file |
 | Fake mode | `AI_PROVIDER=fake` | Lets us learn and test without using free-tier quota or needing a key |
-| API docs | **Swagger UI**, built into FastAPI at `/docs` (generated from our routes and Pydantic models; ReDoc at `/redoc`) | Documentation that cannot go out of date, plus a place to try every endpoint |
+| API docs | Swagger UI, built into FastAPI at `/docs` | Generated from our code, so it cannot go out of date; try every endpoint in the browser |
 | Metrics SDK | `prometheus_client` (official Python client) | The standard way to instrument a Python service |
 | Prometheus + Grafana | Docker Compose | One command to start everything |
 
@@ -38,11 +38,14 @@ flowchart LR
 
 ```
 app/
-  main.py         # Part 1: FastAPI app + routes
-  config.py       # Part 1: reads settings and the API key from .env
+  main.py         # Part 1: FastAPI app, lifespan, includes the routers
+  config.py       # Part 1: settings and the API key from .env
+  routes/         # Part 1: health.py, classify.py, analyze.py (HTTP only)
+  schemas.py      # Part 1: request/response models (also drive Swagger)
+  jobs.py         # Part 1: what each job is (tier, prompt, limits) + input/output handling
   ai_client.py    # Part 1: the ONLY file that talks to the AI API
-  model_selector.py  # Part 1: job -> tier -> model name (classify=light, analyze=heavy)
-  errors.py       # Part 1: our one JSON error shape (404, 405, AI errors)
+  ai_errors.py    # Part 1: our own AI error types
+  errors.py       # Part 1: one JSON error shape for the whole API
   metrics.py      # Part 2: metric definitions
 tests/            # Part 1+: tests run in fake mode
 monitoring/
@@ -73,14 +76,14 @@ Each part follows the same loop:
 | Step | What | Done when |
 |---|---|---|
 | 1.1 | Project skeleton: venv, FastAPI, `GET /health`, first test | `curl localhost:8000/health` → `{"status":"ok"}` |
-| 1.2 | Config and secrets: `.env`, `config.py`, key never logged or returned, plus a custom JSON 404/405 | Server refuses to start in real mode without a key |
-| 1.3 | `ai_client.py`: one Groq client created once and reused, the model and parameters passed per call, plus fake mode. Verify the model name with `GET /models` | a fake (then real) call works from the model client |
-| 1.4 | **Job endpoints and model selection**: `routes/classify.py` (light) and `routes/analyze.py` (heavy). Each endpoint has its own job prompt and token cap. `model_selector.py` maps job → tier → model name from `.env`. This replaces the temporary `/ask` stub | `POST /classify` and `POST /analyze` use different models, and the response says which |
-| 1.5 | Failure handling: timeout, bad key (401), rate limit (429), upstream 5xx → clean JSON errors with sensible HTTP codes | Each failure is reproducible by hand |
-| 1.6 | Tests in fake mode (including routing and each failure) | `pytest` passes |
-| 1.7 | **Document the API with Swagger UI**: summaries and descriptions on routes, tag descriptions, example request and response bodies, and the error responses (`responses={...}`) for 400/429/502/504 | Someone who never saw the code can use every endpoint from `/docs` |
+| 1.2 | Config and secrets (`.env`, `config.py`, key never logged), custom JSON 404/405 | Server refuses to start in real mode without a key |
+| 1.3 | AI client: one Groq client created once and reused, model and limits passed per call, fake mode, our own error types. Verify model names with `GET /models` | A fake and a real call work through `AIClient` |
+| 1.4 | Job endpoints: `routes/classify.py` (light) and `routes/analyze.py` (heavy), wired to `jobs.py` and the client | Each endpoint answers with its own model, and the response says which |
+| 1.5 | HTTP error handling: map our AI errors to 504 / 429 / 502 / 400, and put 422 in the same JSON shape | Each failure is reproducible by hand with the fake markers |
+| 1.6 | Route tests in fake mode, including every failure | `pytest` passes |
+| 1.7 | Swagger documentation: examples and the error responses | Someone who never saw the code can use every endpoint from `/docs` |
 
-**Concepts:** Swagger UI / OpenAPI · async vs sync request handling · custom error handlers · light vs heavy model routing (cost, speed, quality trade-off, why real systems do it) · HTTP request/response lifecycle · why the key stays on the server · env vars vs hard-coded secrets · sync vs async calls · timeouts and retries with backoff · mapping upstream errors to our status codes (502/503/504) · tokens and cost.
+**Concepts:** request/response lifecycle · secrets and config · light vs heavy models · async vs sync · timeouts and retries · mapping upstream errors to HTTP status codes · tokens and cost · Swagger / OpenAPI. Details live in [LEARNING.md](LEARNING.md).
 
 ---
 
