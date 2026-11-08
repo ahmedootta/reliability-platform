@@ -36,6 +36,15 @@ class AIResult:
     output_tokens: int
     latency_ms: int
 
+    def info(self) -> dict:
+        """The facts every successful response carries (matches schemas.CallInfo)."""
+        return {
+            "tier": self.tier,
+            "model": self.model,
+            "usage": {"input_tokens": self.input_tokens, "output_tokens": self.output_tokens},
+            "latency_ms": self.latency_ms,
+        }
+
 
 class AIClient:
     def __init__(self, settings: Settings):

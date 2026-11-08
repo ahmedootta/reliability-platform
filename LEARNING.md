@@ -16,7 +16,7 @@ Two job endpoints sit in front of the AI API: `POST /classify` (always the **lig
 | [app/config.py](app/config.py) | `Settings` from env and `.env`, `get_settings()` | done |
 | [app/errors.py](app/errors.py) | One JSON error shape for 404 and 405 | done |
 | [app/routes/health.py](app/routes/health.py) | `GET /health` | done |
-| [app/routes/classify.py](app/routes/classify.py), [analyze.py](app/routes/analyze.py) | HTTP only: validate, call the client, build the response | stubs, you are writing them |
+| [app/routes/classify.py](app/routes/classify.py), [analyze.py](app/routes/analyze.py) | HTTP only: validate, call the client, build the response | done |
 | [app/schemas.py](app/schemas.py) | Request/response models (drive validation and Swagger) | done |
 | [app/jobs.py](app/jobs.py) | What each job is: tier, prompt, limits; message builders; `pick_label` | done |
 | [app/ai_client.py](app/ai_client.py) | The only file that imports Groq; fake mode; error conversion | done |
@@ -25,12 +25,9 @@ Two job endpoints sit in front of the AI API: `POST /classify` (always the **lig
 
 ---
 
-### 1. How a request travels
+### 1. Servers, framework, middleware
 
-```
-client -> uvicorn -> [ middleware -> exception handlers -> router -> ROUTE ] -> back out the same way
-                      \________ inside our `app` object (FastAPI = Starlette + extras) ________/
-```
+The step-by-step path of one request through our own files is in §6, "The whole flow, end to end".
 
 | Layer | Job | Provided by |
 |---|---|---|
@@ -126,12 +123,6 @@ Matching rules:
 
 ### 3. Config and secrets
 
-```
-real env vars ──┐
-                ├─> pydantic-settings ─> convert + validate ─> Settings ─> get_settings() (cached)
-.env file ──────┘                                                   │
-                                                   main.py lifespan (fail fast) and Depends in routes
-```
 Lookup order per field: real environment variable, then `.env`, then the default in the class.
 
 | Setting | Meaning | Default |
@@ -144,7 +135,7 @@ Lookup order per field: real environment variable, then `.env`, then the default
 
 - **Key vs model:** the key says who you are; the model says which brain answers. Separate settings.
 - **Validation:** types convert (`"30"` becomes `30.0`), `AI_PROVIDER` must be `fake` or `groq`, and `groq` without a key raises an error.
-- **Fail fast:** `lifespan` in `main.py` calls `get_settings()` at startup, so a bad config stops the server with `Application startup failed. Exiting.` (tested with real uvicorn). Nothing did this before we added `lifespan`.
+- **Fail fast:** `lifespan` calls `get_settings()` at startup (step A2 in §6), so a bad config stops the server with `Application startup failed. Exiting.` (tested with real uvicorn).
 - **Using it in a route:** `settings: Settings = Depends(get_settings)`; tests swap it with `app.dependency_overrides`. Only `config.py` touches `.env`; `os.getenv` appears nowhere.
 - ⚠ **`.env` path:** `env_file=".env"` is relative to the folder you launch from. From elsewhere the file is silently not found and the defaults win (`fake`, no key). Fixed with an absolute `ENV_FILE = Path(__file__).resolve().parent.parent / ".env"`.
 - ⚠ **When `.env` seems ignored:** a real env var with the same name wins; `Settings()` does not fill `os.environ`, so `os.getenv("AI_API_KEY")` is `None` even when settings work; typos are silently ignored because of `extra="ignore"`.
@@ -210,32 +201,21 @@ Measured (50 concurrent requests, 0.2 s wait each, one uvicorn process):
 
 Any failure: `{"error": {"type": "rate_limited", "message": "..."}}`. There is no `tier` field: the endpoint decides.
 
-#### Flow
-```mermaid
-flowchart TD
-  A["POST /classify or /analyze"] --> B{"Validate body (Pydantic)"}
-  B -- invalid --> B1["422"]
-  B -- ok --> C["jobs.py: build the message, pick the Job"]
-  C --> D["ai_client.run(job, message): model_for(job), start timer"]
-  D --> E{"AI_PROVIDER"}
-  E -- fake --> F["canned answer, or a marked failure"]
-  E -- groq --> G["Groq call: our key, model, prompt, token cap, timeout"]
-  F --> H["success: text, tokens, latency"]
-  G -- ok --> H
-  G -- exception --> I["converted to our AIError"]
-  H --> J["route builds the response: 200"]
-  I --> K["error handler: HTTP status + error JSON (step 1.5)"]
-```
+#### The route
 
-The route is a few lines (classify; analyze is the same without `pick_label`):
+The route is a few lines (`routes/classify.py`; analyze is the same without `pick_label`):
 ```python
-message = build_classify_message(body.text, body.labels)
-result  = await client.run(JOBS["classify"], message)      # client = Depends(get_ai_client)
-label   = pick_label(result.text, body.labels)
-return ClassifyResponse(label=label, tier=result.tier, model=result.model,
-                        usage=Usage(input_tokens=result.input_tokens, output_tokens=result.output_tokens),
-                        latency_ms=result.latency_ms)
+@router.post("/classify", response_model=ClassifyResponse)           # shape of the answer
+async def classify(body: ClassifyRequest,                            # 1. body validated, 422 if invalid
+                   client: AIClient = Depends(get_ai_client)):       # 2. the shared client
+    message = build_classify_message(body.text, body.labels)         # 3. job-specific question
+    result  = await client.run(JOBS["classify"], message)            # 4. tier decided by the job
+    label   = pick_label(result.text, body.labels)                   # 5. must be an allowed label
+    return ClassifyResponse(label=label, **result.info())            # 6. build the response
 ```
+Where the schemas attach: the **request** model is the type of the `body` parameter (FastAPI validates input before the function runs). The **response** model is `response_model=...` (FastAPI validates and filters the output, and Swagger shows both). `AIResult.info()` supplies the facts shared by every response (`tier`, `model`, `usage`, `latency_ms`).
+
+⚠ **Until step 1.5**, an `AIError` raised by the client is not handled, so the client gets a plain `500 Internal Server Error` instead of the JSON error shape.
 
 #### Why the endpoint decides the tier
 Real products rarely send everything to the biggest model: it is slower, costs more, and hits rate limits sooner.
@@ -281,6 +261,59 @@ A prompt change or a third job (say `/summarize`, light) is one place, not a rou
 - **Logging:** job, tier, model, outcome, latency only. Never the prompt (it may be private) and never the key.
 - **No streaming** (`stream=False`): one JSON reply is simpler to measure; streaming can be a later exercise.
 
+#### The whole flow, end to end
+
+**A. Startup (once, when uvicorn starts the app)**
+
+| # | Where | What happens |
+|---|---|---|
+| A1 | `uvicorn app.main:app` | Imports `main.py`: creates `app`, registers the error handlers, includes the routers |
+| A2 | `main.py` `lifespan` → `config.py` `get_settings()` | Reads real env vars, then `.env`; converts and validates. `groq` without a key stops the server here |
+| A3 | `lifespan` → `ai_client.py` `AIClient(settings)` | If the provider is `groq`, builds **one** `AsyncGroq` (key, timeout, retries) and stores the client in `app.state.ai_client` |
+| A4 | `lifespan` reaches `yield` | The server now accepts requests. After `yield` (shutdown) it closes the client |
+
+`lifespan` is the function that owns steps A2 to A4: everything **before** `yield` runs once before the first request, and everything **after** it runs once at shutdown. See "What `lifespan` does" below.
+
+**B. One request: `POST /classify`** (`/analyze` is identical except where noted)
+
+| # | Where | What happens |
+|---|---|---|
+| B1 | uvicorn → `app` | uvicorn parses the HTTP and calls the app; middleware (none yet) wraps the call; the router matches `POST /classify` |
+| B2 | FastAPI, using `schemas.py` | Validates the body against `ClassifyRequest` (**422** if invalid, and nothing below runs). `Depends(get_ai_client)` supplies the client from `app.state` |
+| B3 | `routes/classify.py` → `jobs.py` `build_classify_message` | Builds the text for the AI: allowed labels plus the text. (analyze: `build_analyze_message`) |
+| B4 | `ai_client.py` `AIClient.run(JOBS["classify"], message)` | `JOBS["classify"]` is the `Job`: tier `light`, system prompt, token cap, temperature. `jobs.py` `model_for` turns the tier into a model name from the settings. The timer starts |
+| B5 | `ai_client.py` provider | **fake:** returns `[fake light] ...`, or raises the error named by a `__fail:...__` marker. **groq:** `_call_groq` sends the Job's system prompt, the message, and the Job's limits to Groq with our key |
+| B6 | `ai_client.py` | Reads the answer text and token counts, stops the timer, logs `job, tier, model, outcome, latency` (never the prompt or key), returns an `AIResult` |
+| B7 | `routes/classify.py` → `jobs.py` `pick_label` | Finds the allowed label in the reply, or raises `AIBadOutput`. (analyze: skipped, the text is the answer) |
+| B8 | `routes/classify.py` → `schemas.py` | `ClassifyResponse(label=..., **result.info())`; `response_model` validates and filters it; the reply goes out as JSON **200** through uvicorn |
+
+**C. When something fails**
+
+| Failure | Where it is caught | Result |
+|---|---|---|
+| Unknown route or wrong method | `errors.py` handler | JSON `404` / `405` |
+| Invalid body (B2) | FastAPI | `422` (default shape for now; step 1.5 unifies it) |
+| Groq error at B5 | `_call_groq` converts it to an `AIError` (table below) | Step 1.5 will map it to 504 / 429 / 502 / 400. ⚠ Today it is an unhandled plain `500` |
+| Unusable reply at B7 | `pick_label` raises `AIBadOutput` | Same as the row above |
+
+#### What `lifespan` does
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()                    # 1. build and validate the config
+    app.state.ai_client = AIClient(settings)     # 2. create the ONE shared AI client
+    yield                                        # 3. the server runs and answers requests here
+    await app.state.ai_client.aclose()           # 4. at shutdown: close the connections
+```
+- **What it is:** FastAPI's hook for "do this when the server starts, and undo it when it stops". `@asynccontextmanager` turns the function into a context manager; FastAPI enters it at startup and leaves it at shutdown. `FastAPI(lifespan=lifespan)` registers it. It replaces the older `@app.on_event("startup")`.
+- **Before `yield`:** runs once, before the first request. If it raises (a bad config), the server refuses to start: `Application startup failed. Exiting.`
+- **`app.state`:** a shared place on the app object for things every request needs. Routes read it through `Depends(get_ai_client)`, which returns `request.app.state.ai_client`.
+- **Why one client:** it holds the key, the connection pool, the timeout and the retries. Building one per request would waste connections and slow every call.
+- **After `yield`:** `aclose()` ends open connections cleanly instead of dropping them.
+- **Why not a global variable:** a global is created at import time, cannot be closed at shutdown, and tests could not control when it is built. In tests, `with TestClient(app):` runs the lifespan; without `with`, it does not run.
+- The parameter `app` is passed in by FastAPI so we can attach the state to it.
+
 #### Failures: Groq exception → our error → HTTP status
 The conversion is done in the client. The HTTP status mapping is step 1.5.
 
@@ -305,7 +338,7 @@ The conversion is done in the client. The HTTP status mapping is step 1.5.
 The heavy call was about 5× slower and produced about 56× the output. Both model names were verified first with Groq's `GET /models`.
 
 #### Testing the layer
-`tests/test_jobs.py` (registry, model lookup, `pick_label`) and `tests/test_ai_client.py` (fake success per tier, every fake failure, every Groq exception conversion using `httpx.Request`/`Response` objects). `pytest-asyncio` with `asyncio_mode = auto` lets tests be `async def`. ⚠ The client lives in `app.state`, which `lifespan` fills, so route tests must use `with TestClient(app):`.
+`tests/test_jobs.py` (registry, model lookup, `pick_label`), `tests/test_ai_client.py` (fake success per tier, every fake failure, every Groq exception conversion using `httpx.Request`/`Response` objects) and `tests/test_routes.py` (each endpoint uses the right model, input validation returns 422, Swagger shows the models). `pytest-asyncio` with `asyncio_mode = auto` lets tests be `async def`. ⚠ The client lives in `app.state`, which `lifespan` fills, so route tests must use `with TestClient(app):`. ⚠ Your real `.env` says `groq`, so route tests set `AI_PROVIDER=fake` with `monkeypatch` (a real env var beats `.env`) and clear the settings cache; otherwise tests would call the real API.
 
 ---
 
@@ -340,7 +373,8 @@ Configured in `main.py`: `title`, `version`, a markdown `description`, `openapi_
 | What does `config.py` do, how does it read `.env`, why did it not? | §3 |
 | Is Swagger built in or embedded by us? | §7 |
 | Who decides light or heavy, and what does `jobs.py` do? | §6 |
-| What is the business logic and flow of calling the AI? | §6 |
+| What is the business logic and the whole flow of calling the AI, file by file? | §6 "The whole flow, end to end" |
+| What does the `lifespan` function do? | §6 "What `lifespan` does" |
 
 ### Interview questions
 _Added at the end of Part 1._

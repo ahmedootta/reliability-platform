@@ -7,9 +7,9 @@ Status key: ⬜ not started · 🚧 in progress · ✅ done
 - [x] 1.1 Project skeleton + `/health`
 - [x] 1.2 Config and secrets (`.env`) + custom 404/405
 - [x] 1.3 AI client: `ai_client.py`, `jobs.py`, `schemas.py`, `ai_errors.py`; verified live
-- [ ] 1.4 Job endpoints `/classify` (light) and `/analyze` (heavy): 🚧 stubs exist, you are writing them; not wired to the client yet
+- [x] 1.4 Job endpoints `/classify` (light) and `/analyze` (heavy), verified live
 - [ ] 1.5 HTTP error handling (AI errors to 504/429/502/400, 422 in our shape)
-- [ ] 1.6 Route tests
+- [ ] 1.6 Route tests for failures (success and validation route tests are done)
 - [ ] 1.7 Swagger documentation (examples, error responses); base setup done
 - [ ] Learning notes written
 - [ ] Discussion / Q&A done
@@ -46,3 +46,5 @@ Status key: ⬜ not started · 🚧 in progress · ✅ done
 | 2026-11-05 | Chose Groq and set up `.env`; step 1.1 (venv, FastAPI, `/health`, first test); revised FastAPI, uvicorn, routers; you split the routes into `app/routes/` | – |
 | 2026-11-07 | Step 1.2: `config.py` with fail-fast `lifespan`, `.env` path fix, custom 404/405; measured sync vs async; explained middleware and Starlette | – |
 | 2026-11-08 | Swagger base setup; decided the endpoint picks the tier (`/classify` light, `/analyze` heavy); step 1.3: AI client verified live (classify 0.4 s, analyze 2.2 s), 28 tests; rewrote the docs by topic and removed `/ask`; fixed `main.py` imports and tags after the `ask` route was deleted | – |
+| 2026-11-09 | Pushed the AI layer and docs. Step 1.4: `/classify` and `/analyze` routes wired to schemas, `jobs.py` and the client; 11 route tests (39 total); live check on real Groq | AI failures return a plain 500 until step 1.5 |
+| 2026-11-09 | Replaced the three separate flow diagrams in LEARNING.md with one end-to-end flow (startup, request, failures) and explained `lifespan` | – |
