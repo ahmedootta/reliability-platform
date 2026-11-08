@@ -143,9 +143,15 @@ Lookup order per field: real environment variable, then `.env`, then the default
 
 ---
 
-### 4. One JSON error shape (404, 405, and later every error)
+### 4. One JSON error shape (every error)
 
-Shape everywhere: `{"error": {"type": "...", "message": "..."}}`.
+Shape everywhere: `{"error": {"type": "...", "message": "..."}}`. Three handlers in [app/errors.py](app/errors.py) produce it:
+
+| Handler for | Status | `type` |
+|---|---|---|
+| `StarletteHTTPException` (unknown route, wrong method, our own `raise HTTPException`) | 404 / 405 / as raised | `not_found`, `method_not_allowed`, `http_error` |
+| `AIError` (any failure of the AI call, table in §6) | 504 / 429 / 502 / 400 | the error's own `type` |
+| `RequestValidationError` (bad input) | 422 | `invalid_input`, plus `fields: [{field, problem}]` |
 
 **Custom 404 is the backend's job.** The frontend cannot change what the API answers, and `curl` and scripts need clean JSON too. By default FastAPI returns `{"detail":"Not Found"}`.
 
@@ -155,7 +161,7 @@ The right way is an exception handler ([app/errors.py](app/errors.py)): it cover
 ```python
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 ```
-Still to unify in step 1.5: **422** validation errors (`RequestValidationError`) and `AIError`. Tests: [tests/test_errors.py](tests/test_errors.py).
+Tests: [tests/test_errors.py](tests/test_errors.py) (404/405) and [tests/test_routes.py](tests/test_routes.py) (AI errors, 422). ⚠ Register handlers for the **exact class** you want caught: a handler for `AIError` catches its subclasses too, so one handler covers all six AI errors, and the status comes from the `AI_ERROR_STATUS` dict, not from `if/else`.
 
 ---
 
@@ -215,7 +221,7 @@ async def classify(body: ClassifyRequest,                            # 1. body v
 ```
 Where the schemas attach: the **request** model is the type of the `body` parameter (FastAPI validates input before the function runs). The **response** model is `response_model=...` (FastAPI validates and filters the output, and Swagger shows both). `AIResult.info()` supplies the facts shared by every response (`tier`, `model`, `usage`, `latency_ms`).
 
-⚠ **Until step 1.5**, an `AIError` raised by the client is not handled, so the client gets a plain `500 Internal Server Error` instead of the JSON error shape.
+If the client raises an `AIError` (or `pick_label` does), the route does not catch it. The exception travels up to the handler in `errors.py` (§4), which turns it into the right status.
 
 #### Why the endpoint decides the tier
 Real products rarely send everything to the biggest model: it is slower, costs more, and hits rate limits sooner.
@@ -249,7 +255,7 @@ A bare tier-to-model lookup is 3 lines and would not justify a file, so the file
 | System prompt | "reply with exactly one allowed label" | "key points, risks, short conclusion" |
 | `max_tokens` / temperature / reasoning effort | 512 / 0 / low | 2048 / 0.3 / medium |
 | Input builder | `build_classify_message(text, labels)` | `build_analyze_message(text, question)` |
-| Output reader | `pick_label(reply, labels)`: exact match, then "label appears in the reply", else `AIBadOutput` | none: the text is the answer |
+| Output reader | `pick_label(reply, labels)`: exact match, then "label appears as a whole word in the reply", else `AIBadOutput` | none: the text is the answer |
 
 A prompt change or a third job (say `/summarize`, light) is one place, not a route rewrite. `model_for(job, settings)` is the tier-to-model lookup.
 
@@ -257,7 +263,7 @@ A prompt change or a third job (say `/summarize`, light) is one place, not a rou
 - **One client, per-call settings:** `AsyncGroq` is built once in `lifespan` (key, timeout, retries) and stored in `app.state`; `Depends(get_ai_client)` hands it to routes. Model, prompt and token cap come from the `Job` on every call. A new key needs a restart.
 - **Retries:** the worst-case wait is timeout × (1 + retries) = 60 s with our defaults. The SDK default of 2 retries would hide retries inside latency (about 90 s).
 - ⚠ **Reasoning models and `max_tokens`:** `gpt-oss` spends tokens thinking, and they count toward `max_completion_tokens`, so a tiny cap can return an empty answer. That is why classify gets 512, not 20. Output tokens in `usage` include reasoning tokens.
-- **Fake mode:** no key, no network. Text containing `__fail:timeout__`, `__fail:rate_limited__`, `__fail:auth__`, `__fail:upstream__` or `__fail:bad_request__` raises that error, so tests and the Part 3 traffic script can produce every failure on demand. Fake answer: `"[fake <tier>] <text>"` with word counts as tokens.
+- **Fake mode:** no key, no network. Text containing `__fail:timeout__`, `__fail:rate_limited__`, `__fail:auth__`, `__fail:upstream__` or `__fail:bad_request__` raises that error, so tests and the Part 3 traffic script can produce every failure on demand. `__fail:bad_output__` makes `/classify` get an answer with no allowed label (`/analyze` has no label check, so it succeeds). Fake answer: `"[fake <tier>] <text>"` with word counts as tokens.
 - **Logging:** job, tier, model, outcome, latency only. Never the prompt (it may be private) and never the key.
 - **No streaming** (`stream=False`): one JSON reply is simpler to measure; streaming can be a later exercise.
 
@@ -292,9 +298,9 @@ A prompt change or a third job (say `/summarize`, light) is one place, not a rou
 | Failure | Where it is caught | Result |
 |---|---|---|
 | Unknown route or wrong method | `errors.py` handler | JSON `404` / `405` |
-| Invalid body (B2) | FastAPI | `422` (default shape for now; step 1.5 unifies it) |
-| Groq error at B5 | `_call_groq` converts it to an `AIError` (table below) | Step 1.5 will map it to 504 / 429 / 502 / 400. ⚠ Today it is an unhandled plain `500` |
-| Unusable reply at B7 | `pick_label` raises `AIBadOutput` | Same as the row above |
+| Invalid body (B2) | `errors.py` validation handler | `422` in our shape, with the wrong fields listed |
+| Groq error at B5 | `_call_groq` converts it to an `AIError` (table below) | `errors.py` AI handler: 504 / 429 / 502 / 400 |
+| Unusable reply at B7 | `pick_label` raises `AIBadOutput` | Same handler: 502 |
 
 #### What `lifespan` does
 
@@ -315,7 +321,7 @@ async def lifespan(app: FastAPI):
 - The parameter `app` is passed in by FastAPI so we can attach the state to it.
 
 #### Failures: Groq exception → our error → HTTP status
-The conversion is done in the client. The HTTP status mapping is step 1.5.
+The client does the first conversion; `AI_ERROR_STATUS` in `errors.py` does the second.
 
 | Groq exception | Our error (`type`) | HTTP status | Why this status |
 |---|---|---|---|
@@ -327,6 +333,7 @@ The conversion is done in the client. The HTTP status mapping is step 1.5.
 | Reply with no allowed label | `AIBadOutput` (`bad_output`) | **502** | The upstream answered unusably |
 
 - ⚠ `APITimeoutError` is a subclass of `APIConnectionError`: catch the most specific exception first, or timeouts are mislabelled. A test proves it.
+- ⚠ **Gotcha found by testing live:** the loose match first used plain `in`, so labels `["a","b"]` accepted "I cannot decide." as `a`. Short labels (`no`, `ham`) hit this too. It now matches whole words only (`tests/test_jobs.py`).
 - Client messages are fixed text, never the provider's raw message, so no key, prompt or internal detail can leak.
 
 #### Live check (real Groq, small inputs)
@@ -338,7 +345,7 @@ The conversion is done in the client. The HTTP status mapping is step 1.5.
 The heavy call was about 5× slower and produced about 56× the output. Both model names were verified first with Groq's `GET /models`.
 
 #### Testing the layer
-`tests/test_jobs.py` (registry, model lookup, `pick_label`), `tests/test_ai_client.py` (fake success per tier, every fake failure, every Groq exception conversion using `httpx.Request`/`Response` objects) and `tests/test_routes.py` (each endpoint uses the right model, input validation returns 422, Swagger shows the models). `pytest-asyncio` with `asyncio_mode = auto` lets tests be `async def`. ⚠ The client lives in `app.state`, which `lifespan` fills, so route tests must use `with TestClient(app):`. ⚠ Your real `.env` says `groq`, so route tests set `AI_PROVIDER=fake` with `monkeypatch` (a real env var beats `.env`) and clear the settings cache; otherwise tests would call the real API.
+`tests/test_jobs.py` (registry, model lookup, `pick_label`), `tests/test_ai_client.py` (fake success per tier, every fake failure, every Groq exception conversion using `httpx.Request`/`Response` objects) and `tests/test_routes.py` (each endpoint uses the right model, every AI failure gives the right status and shape, input validation returns 422, Swagger shows the models). `pytest-asyncio` with `asyncio_mode = auto` lets tests be `async def`. ⚠ The client lives in `app.state`, which `lifespan` fills, so route tests must use `with TestClient(app):`. ⚠ Your real `.env` says `groq`, so route tests set `AI_PROVIDER=fake` with `monkeypatch` (a real env var beats `.env`) and clear the settings cache; otherwise tests would call the real API.
 
 ---
 
@@ -375,6 +382,7 @@ Configured in `main.py`: `title`, `version`, a markdown `description`, `openapi_
 | Who decides light or heavy, and what does `jobs.py` do? | §6 |
 | What is the business logic and the whole flow of calling the AI, file by file? | §6 "The whole flow, end to end" |
 | What does the `lifespan` function do? | §6 "What `lifespan` does" |
+| Why is `auth_error` a 502 and not a 401? How do AI errors become HTTP responses? | §4, §6 failures table |
 
 ### Interview questions
 _Added at the end of Part 1._

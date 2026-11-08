@@ -128,6 +128,8 @@ class AIClient:
         for marker, error in failures.items():
             if marker in user_text:
                 raise error()
+        if "__fail:bad_output__" in user_text:  # answers, but with no allowed label (/classify only)
+            return "I cannot decide.", 1, 3
         text = f"[fake {job.tier}] {user_text}"
         return text, len(user_text.split()), len(text.split())
 

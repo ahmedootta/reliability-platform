@@ -33,3 +33,10 @@ def test_messages_contain_the_inputs():
     assert "a, b" in build_classify_message("hello", ["a", "b"])
     assert "why?" in build_analyze_message("hello", "why?")
     assert "Question" not in build_analyze_message("hello", None)
+
+
+def test_pick_label_does_not_match_inside_other_words():
+    # "no" is inside "cannot" and "a" is inside "decide", but neither is a whole word.
+    with pytest.raises(AIBadOutput):
+        pick_label("I cannot decide.", ["no", "a"])
+    assert pick_label("The answer is no.", ["yes", "no"]) == "no"

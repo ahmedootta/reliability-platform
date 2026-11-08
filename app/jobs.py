@@ -5,6 +5,7 @@ called for that job lives here, so routes stay thin and this file is easy to tes
 (no HTTP, no Groq).
 """
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -72,8 +73,9 @@ def pick_label(reply: str, labels: list[str]) -> str:
     for label in labels:  # exact match first
         if cleaned == label.strip().lower():
             return label
-    for label in labels:  # then "label appears inside the reply"
-        if label.strip().lower() in cleaned:
+    for label in labels:  # then "label appears as a whole word/phrase in the reply"
+        # whole-word only: a plain `in` would match "no" inside "cannot" or "a" inside "decide"
+        if re.search(rf"(?<!\w){re.escape(label.strip().lower())}(?!\w)", cleaned):
             return label
     raise AIBadOutput("The AI did not return one of the allowed labels.")
 

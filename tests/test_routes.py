@@ -61,3 +61,37 @@ def test_swagger_shows_the_request_and_response_models(client):
     classify = paths["/classify"]["post"]
     assert classify["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith("ClassifyRequest")
     assert classify["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("ClassifyResponse")
+
+
+# ---- failures: every AI error becomes the right status in our JSON shape ----
+
+@pytest.mark.parametrize("marker, status, error_type", [
+    ("__fail:timeout__", 504, "timeout"),
+    ("__fail:rate_limited__", 429, "rate_limited"),
+    ("__fail:auth__", 502, "auth_error"),
+    ("__fail:upstream__", 502, "upstream_error"),
+    ("__fail:bad_request__", 400, "bad_request"),
+])
+def test_ai_failures_map_to_http_errors(client, marker, status, error_type):
+    classify = client.post("/classify", json={"text": marker, "labels": LABELS})
+    analyze = client.post("/analyze", json={"text": marker})
+    for response in (classify, analyze):
+        assert response.status_code == status
+        error = response.json()["error"]
+        assert error["type"] == error_type
+        assert marker not in error["message"]  # messages never echo the input
+
+
+def test_unusable_model_answer_is_a_502(client):
+    # The fake model answers "I cannot decide.", which is none of the labels.
+    response = client.post("/classify", json={"text": "__fail:bad_output__", "labels": LABELS})
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "bad_output"
+
+
+def test_invalid_input_uses_our_error_shape(client):
+    response = client.post("/classify", json={"text": "", "labels": ["only-one"]})
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["type"] == "invalid_input"
+    assert {f["field"] for f in error["fields"]} == {"text", "labels"}
