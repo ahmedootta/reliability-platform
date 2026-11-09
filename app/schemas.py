@@ -30,6 +30,10 @@ class ClassifyRequest(BaseModel):
 
 class ClassifyResponse(CallInfo):
     label: str = Field(examples=["negative"])
+    model_config = {"json_schema_extra": {"examples": [{
+        "tier": "light", "model": "openai/gpt-oss-20b",
+        "usage": {"input_tokens": 110, "output_tokens": 17}, "latency_ms": 400, "label": "negative",
+    }]}}
 
 
 class AnalyzeRequest(BaseModel):
@@ -39,6 +43,11 @@ class AnalyzeRequest(BaseModel):
 
 class AnalyzeResponse(CallInfo):
     analysis: str
+    model_config = {"json_schema_extra": {"examples": [{
+        "tier": "heavy", "model": "openai/gpt-oss-120b",
+        "usage": {"input_tokens": 126, "output_tokens": 830}, "latency_ms": 2100,
+        "analysis": "The latency doubled right after the release, so ...",
+    }]}}
 
 
 class ErrorBody(BaseModel):
@@ -48,3 +57,4 @@ class ErrorBody(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
+

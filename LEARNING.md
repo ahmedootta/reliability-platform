@@ -20,7 +20,7 @@ Two job endpoints sit in front of the AI API: `POST /classify` (always the **lig
 | [app/schemas.py](app/schemas.py) | Request/response models (drive validation and Swagger) | done |
 | [app/jobs.py](app/jobs.py) | What each job is: tier, prompt, limits; message builders; `pick_label` | done |
 | [app/ai_client.py](app/ai_client.py) | The only file that imports Groq; fake mode; error conversion | done |
-| [app/ai_errors.py](app/ai_errors.py) | Our own AI error types | done |
+| [app/errors.py](app/errors.py) | **The one catalogue of every error** (status, type, message, Swagger text), the handlers, and `error_responses()` | done |
 | `tests/`, [pytest.ini](pytest.ini), [requirements.txt](requirements.txt), [.env.example](.env.example) | Tests (run in fake mode), pytest config, dependencies, settings template | done |
 
 ---
@@ -143,15 +143,35 @@ Lookup order per field: real environment variable, then `.env`, then the default
 
 ---
 
-### 4. One JSON error shape (every error)
+### 4. One JSON error shape, defined in one file (every error)
 
-Shape everywhere: `{"error": {"type": "...", "message": "..."}}`. Three handlers in [app/errors.py](app/errors.py) produce it:
+Shape everywhere: `{"error": {"type": "...", "message": "..."}}`. [app/errors.py](app/errors.py) is the **single source of truth**. Every error is one class with four fields:
 
-| Handler for | Status | `type` |
-|---|---|---|
-| `StarletteHTTPException` (unknown route, wrong method, our own `raise HTTPException`) | 404 / 405 / as raised | `not_found`, `method_not_allowed`, `http_error` |
-| `AIError` (any failure of the AI call, table in §6) | 504 / 429 / 502 / 400 | the error's own `type` |
-| `RequestValidationError` (bad input) | 422 | `invalid_input`, plus `fields: [{field, problem}]` |
+```python
+class AIRateLimited(AIError):
+    status = 429                  # HTTP code
+    type = "rate_limited"         # stable name; the frontend branches on it; later a metric label
+    message = "The AI provider is limiting requests. Try again later."   # safe to show a client
+    description = "The AI provider is rate limiting us. Try again later."  # what /docs says
+```
+
+From these classes we get three things, so nothing is written twice:
+1. **The exceptions the code raises:** `raise AITimeout()` in `ai_client.py`, `raise AIBadOutput(...)` in `jobs.py`.
+2. **The response body:** one handler for `APIError` returns `exc.status`, `exc.type`, `exc.message`. It also catches every subclass, so it covers all AI errors.
+3. **The failure list in `/docs`:** `error_responses(502, ...)` walks the classes, groups them by status (502 lists `auth_error`, `upstream_error` and `bad_output`, one example each) and builds the Swagger `responses=`.
+
+**To add an error:** write one class. Handler and docs pick it up. Tests check that every class has all fields, that no two share a `type`, that the handler and docs agree with the class, and that asking for a status nobody returns fails loudly.
+
+| Error class | Status | `type` | Raised by |
+|---|---|---|---|
+| `AITimeout` | 504 | `timeout` | `ai_client.py` |
+| `AIRateLimited` | 429 | `rate_limited` | `ai_client.py` |
+| `AIAuthError` / `AIUpstreamError` / `AIBadOutput` | 502 | `auth_error` / `upstream_error` / `bad_output` | client / `jobs.py` |
+| `AIBadRequest` | 400 | `bad_request` | `ai_client.py` |
+| `InvalidInput` | 422 | `invalid_input` (+ `fields`) | FastAPI validation |
+| `NotFound` / `MethodNotAllowed` | 404 / 405 | `not_found` / `method_not_allowed` | the framework |
+
+Three handlers in `errors.py` (for `APIError`, `StarletteHTTPException`, `RequestValidationError`) turn them into JSON.
 
 **Custom 404 is the backend's job.** The frontend cannot change what the API answers, and `curl` and scripts need clean JSON too. By default FastAPI returns `{"detail":"Not Found"}`.
 
@@ -161,7 +181,7 @@ The right way is an exception handler ([app/errors.py](app/errors.py)): it cover
 ```python
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 ```
-Tests: [tests/test_errors.py](tests/test_errors.py) (404/405) and [tests/test_routes.py](tests/test_routes.py) (AI errors, 422). ⚠ Register handlers for the **exact class** you want caught: a handler for `AIError` catches its subclasses too, so one handler covers all six AI errors, and the status comes from the `AI_ERROR_STATUS` dict, not from `if/else`.
+Tests: [tests/test_errors.py](tests/test_errors.py) (404/405, the catalogue) and [tests/test_routes.py](tests/test_routes.py) (AI errors, 422). ⚠ A handler registered for a class also catches its subclasses, so one handler covers every error that inherits from `APIError`.
 
 ---
 
@@ -321,7 +341,7 @@ async def lifespan(app: FastAPI):
 - The parameter `app` is passed in by FastAPI so we can attach the state to it.
 
 #### Failures: Groq exception → our error → HTTP status
-The client does the first conversion; `AI_ERROR_STATUS` in `errors.py` does the second.
+The client does the first conversion (Groq exception → our class); the class itself carries the HTTP status.
 
 | Groq exception | Our error (`type`) | HTTP status | Why this status |
 |---|---|---|---|
@@ -360,6 +380,12 @@ Built in; nothing to install. Two separate things:
 | `/docs` | Swagger UI: open a route, **Try it out**, send a real request |
 | `/redoc` | Read-only reference |
 | `/openapi.json` | The machine-readable description |
+
+**What we added so a stranger can use `/docs` (step 1.7):**
+- **Examples in requests:** `Field(examples=[...])` on the request models fills the **Try it out** box with realistic input instead of `"string"`.
+- **Examples in responses:** `model_config = {"json_schema_extra": {"examples": [...]}}` on `ClassifyResponse` and `AnalyzeResponse` ([app/schemas.py](app/schemas.py)).
+- **Failures:** `responses=error_responses(400, 422, 429, 502, 504)` on each route lists every failure with our error shape, built from the classes in `errors.py`. FastAPI only documents 200 and a default 422 on its own. Passing 422 here **replaces** its default shape with ours, so the docs match what the server really returns.
+- The descriptions and examples are not written by hand: `error_responses()` reads them from the error classes, so docs cannot drift from behaviour. (Before the refactor they were typed in a third place and could.)
 
 It describes the contract; it does **not** track live traffic. That is Prometheus and Grafana in Parts 2 and 3.
 

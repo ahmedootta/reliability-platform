@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from app.ai_errors import AIBadOutput
+from app.errors import AIBadOutput
 from app.config import Settings
 
 Tier = Literal["light", "heavy"]

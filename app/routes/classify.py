@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from app.ai_client import AIClient, get_ai_client
+from app.errors import error_responses
 from app.jobs import JOBS, build_classify_message, pick_label
 from app.schemas import ClassifyRequest, ClassifyResponse
 
@@ -10,6 +11,7 @@ router = APIRouter(tags=["classify"])
 @router.post(
     "/classify",
     response_model=ClassifyResponse,  # the shape of the answer: validated, and shown in Swagger
+    responses=error_responses(400, 422, 429, 502, 504),  # the failures, shown in Swagger
     summary="Classify a text with the light model",
 )
 async def classify(

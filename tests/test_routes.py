@@ -95,3 +95,24 @@ def test_invalid_input_uses_our_error_shape(client):
     error = response.json()["error"]
     assert error["type"] == "invalid_input"
     assert {f["field"] for f in error["fields"]} == {"text", "labels"}
+
+
+# ---- Swagger documents the failures too ----
+
+@pytest.mark.parametrize("path", ["/classify", "/analyze"])
+def test_swagger_lists_every_error_response(client, path):
+    responses = client.get("/openapi.json").json()["paths"][path]["post"]["responses"]
+    assert {"200", "400", "422", "429", "502", "504"} <= set(responses)
+    for status in ("400", "422", "429", "502", "504"):
+        assert responses[status]["content"]["application/json"]["schema"]["$ref"].endswith("ErrorResponse")
+    assert "invalid_input" in responses["422"]["content"]["application/json"]["examples"]
+    # 502 has three causes: all three are documented, with one example each
+    assert set(responses["502"]["content"]["application/json"]["examples"]) == {
+        "auth_error", "upstream_error", "bad_output"}
+
+
+def test_swagger_shows_example_requests_and_responses(client):
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert schemas["ClassifyRequest"]["properties"]["labels"]["examples"]
+    assert schemas["ClassifyResponse"]["examples"][0]["tier"] == "light"
+    assert schemas["AnalyzeResponse"]["examples"][0]["tier"] == "heavy"

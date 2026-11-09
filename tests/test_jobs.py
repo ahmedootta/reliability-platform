@@ -1,6 +1,6 @@
 import pytest
 
-from app.ai_errors import AIBadOutput
+from app.errors import AIBadOutput
 from app.config import Settings
 from app.jobs import JOBS, build_analyze_message, build_classify_message, model_for, pick_label
 

@@ -3,7 +3,7 @@ import httpx
 import pytest
 
 from app.ai_client import AIClient
-from app.ai_errors import (
+from app.errors import (
     AIAuthError, AIBadRequest, AIRateLimited, AITimeout, AIUpstreamError,
 )
 from app.config import Settings

@@ -44,8 +44,7 @@ app/
   schemas.py      # Part 1: request/response models (also drive Swagger)
   jobs.py         # Part 1: what each job is (tier, prompt, limits) + input/output handling
   ai_client.py    # Part 1: the ONLY file that talks to the AI API
-  ai_errors.py    # Part 1: our own AI error types
-  errors.py       # Part 1: one JSON error shape for the whole API
+  errors.py       # Part 1: THE catalogue of every error + handlers + Swagger error docs
   metrics.py      # Part 2: metric definitions
 tests/            # Part 1+: tests run in fake mode
 monitoring/

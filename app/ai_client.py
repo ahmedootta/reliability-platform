@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import groq
 from fastapi import Request
 
-from app.ai_errors import (
+from app.errors import (
     AIAuthError,
     AIBadRequest,
     AIError,
