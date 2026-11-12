@@ -13,7 +13,7 @@ Status key: ⬜ not started · 🚧 in progress · ✅ done
 - [x] 1.7 Swagger documentation (request/response examples, error responses)
 - [x] Learning notes written
 - [ ] Discussion / Q&A done
-- [ ] Interview questions answered (0 / 15)
+- [ ] Interview questions answered (1 / 15)
 
 ## Part 2: Prometheus monitoring ⬜
 
@@ -51,3 +51,4 @@ Status key: ⬜ not started · 🚧 in progress · ✅ done
 | 2026-11-08 | Pushed routes. Could not reproduce 0 tokens on `/analyze` (8 live calls fine). Step 1.5/1.6: `AIError` and 422 handlers in `errors.py`, `AI_ERROR_STATUS` map, `__fail:bad_output__` marker, failure route tests; fixed `pick_label` matching "a" inside "cannot" | 0-token report: waiting for the exact response and log line |
 | 2026-11-08 | Pushed step 1.5. Step 1.7: error responses and examples in Swagger (`error_responses()` helper), 3 new tests (50 total). All coding steps of Part 1 done | Part 1 interview questions |
 | 2026-11-08 | Refactor: merged `ai_errors.py`, the status map and the Swagger error text into one catalogue in `errors.py` (class per error); docs generated from it; 53 tests | – |
+| 2026-11-11 | Wrote the 15 Part 1 interview questions (12 FastAPI, 3 AI API) | You answer them; then Part 2 |

@@ -411,7 +411,27 @@ Configured in `main.py`: `title`, `version`, a markdown `description`, `openapi_
 | Why is `auth_error` a 502 and not a 401? How do AI errors become HTTP responses? | §4, §6 failures table |
 
 ### Interview questions
-_Added at the end of Part 1._
+15 questions: **12 on FastAPI** (1–12) and **3 on the AI API** (13–15). Answer in your own words first, then check the section. 🛠 = hands-on: do it in the code.
+
+**FastAPI**
+1. What are uvicorn, ASGI, Starlette and FastAPI, and which one does what? What does `uvicorn app.main:app` mean? _(§1)_
+2. What is the difference between `def` and `async def` routes? What goes wrong if you call blocking code (like `time.sleep`) inside `async def`? 🛠 Reproduce it with two parallel requests. _(§5)_
+3. How does FastAPI validate a request body? What produces a 422, and how did we change its shape? 🛠 Add a `max_length` rule and find out which `fields` entry appears. _(§2, §4)_
+4. What does `response_model` do besides documentation? What happens to extra fields the function returns? _(§6, §7)_
+5. What is `Depends`? Why do we get the AI client through `Depends(get_ai_client)` and not by importing it? 🛠 Use `app.dependency_overrides` to replace it with a client that always fails. _(§6)_
+6. What does `lifespan` do, and why is it better than a global variable or the old `@app.on_event`? What is `app.state`? What happens if the code before `yield` raises? _(§6)_
+7. What do `prefix` and `tags` do in `APIRouter`? What does `include_router` do, and which route wins when two paths match? _(§2)_
+8. How does an `AIError` raised deep in `ai_client.py` become a JSON 504 or 429? Why is one handler enough for all subclasses? Why must you register the 404 handler for Starlette's `HTTPException` and not FastAPI's? 🛠 Add a new error class and see it work with no other change. _(§4)_
+9. Why does `@router.get("*")` not work as a custom 404? What is the right way? _(§4)_
+10. Middleware, dependency or exception handler: which would you use for (a) timing every request, (b) checking an API key, (c) turning an exception into JSON? Why? _(§1, §2, §4)_
+11. How does `pydantic-settings` choose a value (env var, `.env`, default)? What are `SecretStr` and `lru_cache` doing in `config.py`? Why did the `.env` file not load at first? _(§3)_
+12. How does Swagger get generated, and what is the difference between `response_model=` and `responses=`? Why is `/docs` blank offline? Which Swagger parts are default and which did we configure? _(§7)_
+
+**AI API**
+
+13. Map each failure to a status and say why: timeout, rate limit, wrong key, provider down, bad model output. Why is a wrong key a 502 and not a 401? Why are client messages fixed text? _(§4, §6)_
+14. Why create one Groq client at startup instead of one per request? What is the worst-case wait with `timeout=30` and `max_retries=1`? Why did the SDK default of 2 retries not fit? _(§6)_
+15. Why does `/classify` get `max_completion_tokens=512` for a one-word answer? Why does the endpoint decide light vs heavy, and not the client? How is the API key kept off the client? _(§3, §6)_
 
 ---
 
