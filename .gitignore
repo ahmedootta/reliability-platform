@@ -11,9 +11,6 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
-# generated protobuf/gRPC code (built by `make proto`, never committed)
-gen/
-
 # personal study notes (answers in your own words)
 notes/
 
